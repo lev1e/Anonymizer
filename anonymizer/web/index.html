@@ -148,6 +148,9 @@ dialog::backdrop { background: rgba(20, 20, 19, .5); }
           <div class="hint">Только для этого запуска. Постоянный список: Настройки.</div>
         </div>
         <label class="check"><input type="checkbox" id="opt-numbers"><span>Заменять числа в Excel. Даты и годы не меняются, результаты формул очищаются.</span></label>
+        <label class="check"><input type="checkbox" id="opt-strict"><span>Скрывать и сомнительные слова<br><span class="hint">Всё из списка «Возможно, нужно скрыть ещё». Может скрыть и обычные термины.</span></span></label>
+        <label class="check"><input type="checkbox" id="opt-countries"><span>Скрывать страны<br><span class="hint">Китай, Армения, ОАЭ и слова от них: «китайский», «в Армении».</span></span></label>
+        <label class="check"><input type="checkbox" id="opt-names"><span>Заменять названия файлов нейтральными<br><span class="hint">Файл1, Файл2… При возврате файл снова получит исходное название.</span></span></label>
       </div>
     </details>
     <div class="row"><button class="btn main" id="btn-anon" disabled>Обезличить</button></div>
@@ -179,6 +182,9 @@ dialog::backdrop { background: rgba(20, 20, 19, .5); }
     <div class="field"><h4>Никогда не скрывать</h4>
       <textarea id="pref-keep" aria-label="Никогда не скрывать" placeholder="По одному в строке: слова, ошибочно принятые за имена"></textarea></div>
     <label class="check"><input type="checkbox" id="pref-numbers"><span>Заменять числа в Excel по умолчанию</span></label>
+    <label class="check"><input type="checkbox" id="pref-strict"><span>Скрывать и сомнительные слова по умолчанию</span></label>
+    <label class="check"><input type="checkbox" id="pref-countries"><span>Скрывать страны по умолчанию</span></label>
+    <label class="check"><input type="checkbox" id="pref-names"><span>Заменять названия файлов нейтральными по умолчанию</span></label>
     <div class="field"><h4>Хранение соответствий</h4>
       <select id="pref-retention" aria-label="Срок хранения соответствий">
         <option value="30">30 дней</option><option value="90">90 дней</option><option value="180">180 дней</option>
@@ -376,7 +382,8 @@ async function runJob(mode, endpoint, body) {
 }
 $("#btn-anon").onclick = () => {
   const ids = modes.anon.files.filter(f => f.state === "ready" && f.info.supported).map(f => f.id);
-  const options = {hide_terms: lines($("#hide-once").value), numbers: $("#opt-numbers").checked};
+  const options = {hide_terms: lines($("#hide-once").value), numbers: $("#opt-numbers").checked, strict: $("#opt-strict").checked,
+    countries: $("#opt-countries").checked, neutral_names: $("#opt-names").checked};
   modes.anon.lastOptions = options;
   runJob("anon", "/api/anonymize", {files: ids, options});
 };
@@ -395,7 +402,8 @@ const MODE = {anonymize: "anon", restore: "rest"};
 function fileHtml(job, f, i) {
   const state = f.status === "error" ? "Не обработан" : f.status === "attention" ? "Готово, есть замечания" : "Готово";
   const detail = job.kind === "anonymize" ? countsText(f.counts) : (f.total ? `Восстановлено значений: ${f.total}` : "");
-  const from = f.out_name && f.name !== f.out_name ? `Исходный файл: ${esc(f.name)}` : "";
+  // Обезличенный файл может называться нейтрально («Файл1»): рядом показывается, из какого файла он сделан.
+  const from = f.out_name && f.name !== f.out_name ? (job.kind === "anonymize" ? `Из файла: ${esc(f.name)}` : `Возвращён из: ${esc(f.name)}`) : "";
   const meta = [state, detail, from].filter(Boolean).join(" · ");
   const msgs = f.messages.length ? `<ul class="msgs">${f.messages.map(m => `<li class="${esc(m.level)}">${esc(m.text)}</li>`).join("")}</ul>` : "";
   const save = f.downloadable ? `<button class="btn" data-save="${i}">Сохранить как…</button>` : "";
@@ -409,8 +417,10 @@ function renderResult(mode, job) {
   let status = "", cls = "", sub = "";
   if (job.kind === "anonymize") {
     const sugg = (r.suggestions || []).filter(x => x.strong).length;
+    const weakLeft = r.weak_total != null ? r.weak_total : (r.suggestions || []).filter(x => !x.strong).length;
     if (!okFiles.length) { status = "Файл не обезличен."; cls = " error"; sub = "Причина указана ниже."; }
     else if (errors || attention || sugg) { status = "Файл готов, но его нужно проверить."; sub = "Прочитайте замечания ниже до загрузки в ИИ. Заменено значений: " + (r.total || 0) + "."; }
+    else if (weakLeft) { status = "Готово. Перед загрузкой в ИИ просмотрите менее вероятные слова."; sub = "Заменено значений: " + (r.total || 0) + ". Не просмотрены менее вероятные слова: " + weakLeft + "."; }
     else { status = "Готово. Файл можно загружать в ИИ."; sub = "Заменено значений: " + (r.total || 0) + "."; }
   } else {
     if (!okFiles.length) { status = "Файл не восстановлен."; cls = " error"; sub = "Причина указана ниже."; }
@@ -487,7 +497,9 @@ function anonymizeExtras(job) {
       strong.slice(0, 15).map(row).join("") + `</div>` +
       (strong.length > 15 ? `<details><summary>Показать остальные (${strong.length - 15})</summary><div class="sug">${strong.slice(15).map(row).join("")}</div></details>` : "") + `</details>`;
   }
-  if (weak.length) html += `<details><summary>Менее вероятные слова (${weak.length})</summary><p class="hint" style="margin-top:0">Аббревиатуры и иностранные слова: чаще всего обычные термины.</p><div class="sug">${weak.slice(0, 30).map(row).join("")}</div></details>`;
+  const weakTotal = r.weak_total != null ? r.weak_total : weak.length;
+  const weakMore = weakTotal > weak.length ? ` Показаны ${weak.length} из ${weakTotal}.` : "";
+  if (weak.length) html += `<details><summary>Менее вероятные слова (${weakTotal})</summary><p class="hint" style="margin-top:0">Аббревиатуры и иностранные слова: чаще всего обычные термины.${weakMore}</p><div class="sug">${weak.map(row).join("")}</div></details>`;
   const groups = r.groups || {}, order = r.groups_order || [];
   if (order.length) {
     html += `<details><summary>Что заменено (${r.total})</summary><p class="hint" style="margin-top:0">Если заменено лишнее, отметьте слово: при повторном обезличивании оно останется.</p>`;
@@ -534,7 +546,7 @@ function bindExtras(mode, job) {
     const overrides = {}, sugg = job.result.suggestions || [];
     box.querySelectorAll("[data-sug]:checked").forEach(c => { overrides[sugg[+c.dataset.sug].text] = "hide"; });
     box.querySelectorAll("[data-keep]:checked").forEach(c => { overrides[c.dataset.keep] = "keep"; });
-    const options = {...modes.anon.lastOptions, hide_terms: [...(modes.anon.lastOptions.hide_terms || []), ...lines($("#extra-terms").value)]};
+    const options = {...modes.anon.lastOptions, strict: $("#opt-strict").checked, countries: $("#opt-countries").checked, neutral_names: $("#opt-names").checked, hide_terms: [...(modes.anon.lastOptions.hide_terms || []), ...lines($("#extra-terms").value)]};
     modes.anon.lastOptions = options;
     runJob("anon", "/api/rerun", {job: job.id, overrides, options});
   };
@@ -544,6 +556,9 @@ function bindExtras(mode, job) {
 async function loadState() {
   STATE = await api("/api/state");
   $("#opt-numbers").checked = !!STATE.prefs.numbers;
+  $("#opt-strict").checked = !!STATE.prefs.strict;
+  $("#opt-countries").checked = !!STATE.prefs.countries;
+  $("#opt-names").checked = !!STATE.prefs.neutral_names;
   $("#notice").hidden = !STATE.notice; $("#notice").textContent = STATE.notice || "";
 }
 function fillSettings() {
@@ -551,6 +566,9 @@ function fillSettings() {
   $("#pref-hide").value = (p.hide_terms || []).join("\n");
   $("#pref-keep").value = (p.keep_terms || []).join("\n");
   $("#pref-numbers").checked = !!p.numbers;
+  $("#pref-strict").checked = !!p.strict;
+  $("#pref-countries").checked = !!p.countries;
+  $("#pref-names").checked = !!p.neutral_names;
   $("#pref-retention").value = String(p.retention_days);
   $("#vault-stats").textContent = `Сохранено значений: ${STATE.stats.entities}.`;
 }
@@ -558,8 +576,12 @@ $("#open-settings").onclick = async () => { try { await loadState(); } catch (e)
 $("#btn-save-settings").onclick = async () => {
   try {
     STATE = await post("/api/prefs", {hide_terms: lines($("#pref-hide").value), keep_terms: lines($("#pref-keep").value),
-      numbers: $("#pref-numbers").checked, retention_days: +$("#pref-retention").value});
+      numbers: $("#pref-numbers").checked, strict: $("#pref-strict").checked,
+      countries: $("#pref-countries").checked, neutral_names: $("#pref-names").checked, retention_days: +$("#pref-retention").value});
     $("#opt-numbers").checked = !!STATE.prefs.numbers;
+    $("#opt-strict").checked = !!STATE.prefs.strict;
+    $("#opt-countries").checked = !!STATE.prefs.countries;
+    $("#opt-names").checked = !!STATE.prefs.neutral_names;
     $("#settings").close(); toast("Настройки сохранены");
   } catch (e) { toast(e.message); }
 };

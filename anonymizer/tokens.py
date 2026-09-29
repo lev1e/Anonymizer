@@ -32,6 +32,7 @@ KINDS: tuple[Kind, ...] = (
     Kind("PROJECT", "Project", "projects", "проекты и объекты"),
     Kind("CITY", "City", "places", "города и населённые пункты"),
     Kind("REGION", "Region", "places", "регионы"),
+    Kind("COUNTRY", "Country", "places", "страны"),
     Kind("ADDRESS", "Address", "places", "адреса"),
     Kind("EMAIL", "Email", "contacts", "email"),
     Kind("PHONE", "Phone", "contacts", "телефоны"),

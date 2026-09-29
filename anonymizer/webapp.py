@@ -269,7 +269,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({"job": job_id})
             if path == "/api/prefs":
                 body = self._json_body()
-                allowed = {k: body[k] for k in ("retention_days", "hide_terms", "keep_terms", "numbers") if k in body}
+                allowed = {k: body[k] for k in ("retention_days", "hide_terms", "keep_terms", "numbers", "strict", "countries", "neutral_names") if k in body}
                 self.app.vault.set_prefs(**allowed)
                 return self._json(self.app.state())
             if path == "/api/vault/clear":

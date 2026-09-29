@@ -111,7 +111,8 @@ ADDRESS_TAIL = (r"(?:кв\.\s?\d+[а-я]?|д(?:ом)?\.?\s?\d+[а-я]?|корп(
 PII_RULES: tuple[Rule, ...] = (
     # Точка после адреса — конец предложения, а не часть домена: «Пишите: ivan@firma.ru.» Раньше такой адрес не находился вовсе,
     # а домен заменялся отдельно, и локальная часть оставалась в файле.
-    Rule("EMAIL", re.compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,24}(?![\w-])(?!\.[\w-])", re.I), .995, "Адрес электронной почты"),
+    # Опечатка перед «@» («ivan;@yandex.ru») — всё ещё адрес: без неё логин оставался открытым, а «@yandex» уходил в учётную запись.
+    Rule("EMAIL", re.compile(r"(?<![\w.+-])[A-Z0-9._%+-]+[;:,]?@[A-Z0-9.-]+\.[A-Z]{2,24}(?![\w-])(?!\.[\w-])", re.I), .995, "Адрес электронной почты"),
     Rule("PHONE", re.compile(r"(?<![\d\w\-])(?:\+\d{1,3}|8)[\s()\-]*\d{3,4}[\s()\-]*\d{2,3}[\s\-]*\d{2}[\s\-]*\d{2}(?![\d\w\-])"), .97, "Номер телефона"),
     # Российский номер без кода страны: «(495) 123-45-72», «495 123-45-73», «916-123-45-81», «7(495)1234571», «79161234567».
     Rule("PHONE", re.compile(r"(?<![\d\w\-])7\s?\(\d{3}\)\s?\d{7}(?![\d\w])"), .93, "Номер телефона"),
@@ -167,7 +168,8 @@ PII_RULES: tuple[Rule, ...] = (
     Rule("ADDRESS", re.compile(r"(?<![\d\w])\d{6}(?=,\s*[А-ЯЁ][а-яё]+)"), .80, "Почтовый индекс"),
     # Профили: путь после домена называет человека («t.me/vector_co», «linkedin.com/in/ivan-ivanov»).
     Rule("USERNAME", re.compile(r"(?i)(?<![\w@/.])(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me|vk\.com|ok\.ru|facebook\.com|instagram\.com|linkedin\.com/in|github\.com|twitter\.com|x\.com|wa\.me)/[\w.\-]{2,64}"), .90, "Ссылка на профиль"),
-    Rule("USERNAME", re.compile(r"(?<![\w@/])@[A-Za-z][A-Za-z0-9_]{4,31}(?!\w)"), .90, "Учётная запись мессенджера"),
+    # «@yandex.ru» — хвост адреса почты, а не учётная запись.
+    Rule("USERNAME", re.compile(r"(?<![\w@/])@[A-Za-z][A-Za-z0-9_]{4,31}(?!\w)(?!\.[A-Za-z]{2,})"), .90, "Учётная запись мессенджера"),
     Rule("IP_ADDRESS", re.compile(r"(?<![\w.])(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?!\w)(?!\.\d)"), .88, "IP-адрес"),
 )
 
@@ -501,10 +503,15 @@ class NameIndex:
                     continue
                 for value, table in ((surname, self.surname), (given, self.given), (patronymic, self.patronymic)):
                     if value and len(value) >= 2:
-                        key = fold(value)
-                        table[key].add(pid)
-                        if table is self.surname:
-                            self.surname_keys[pid].add(key)
+                        # Латинская запись того же человека во втором столбце строится от увиденной формы, а не только
+                        # от выведенной начальной: «Орёл» не должен зависеть от того, во что его превратил словарь.
+                        forms = {value} | (mo.transliterate(value) if table is not self.patronymic
+                                           and "Ѐ" <= value[0] <= "ӿ" else set())
+                        for form in forms:
+                            key = fold(form)
+                            table[key].add(pid)
+                            if table is self.surname:
+                                self.surname_keys[pid].add(key)
 
     def learn_patronymic(self, person_ids: set[str], patronymic: str) -> None:
         """A directory holding only "Мария Иванова" still gets to match "Иванова М.С." once the
@@ -542,6 +549,21 @@ def identity_key(category: str, value: str) -> str:
     if category == "SECRET":
         return hashlib.sha256(value.encode("utf-8")).hexdigest()[:20]
     return re.sub(r"\s+", " ", fold(value)).strip()
+
+
+def _edit_distance(left: str, right: str, limit: int) -> int:
+    """Расстояние Левенштейна с ранним выходом: всё, что больше `limit`, возвращается как `limit + 1`."""
+    if abs(len(left) - len(right)) > limit:
+        return limit + 1
+    previous = list(range(len(right) + 1))
+    for row, a in enumerate(left, 1):
+        current = [row]
+        for col, b in enumerate(right, 1):
+            current.append(min(previous[col] + 1, current[col - 1] + 1, previous[col - 1] + (a != b)))
+        if min(current) > limit:
+            return limit + 1
+        previous = current
+    return previous[-1]
 
 
 def local_person_id(surname: str, given: str, patronymic: str) -> str:
@@ -591,6 +613,13 @@ class Detector:
         self.token_known = None
         # Тексты, которые стоят в столбцах с ФИО: заполняется по заголовкам таблиц (см. formats._person_column_values).
         self.person_values: set[str] = set()
+        # Места, найденные разбором названий в тексте, который сейчас разбирается (координаты нормализованного текста).
+        self._geo_spans: list[tuple[int, int]] = []
+        # Слитные пары заглавных («ОП», «СЦ»), стоящие перед разными словами с заглавной: это сокращения, а не инициалы.
+        self._caps_followers: dict[str, set[str]] = defaultdict(set)
+        self.abbreviations: set[str] = set()
+        # Латинские ФИО, отложенные до конца прохода обучения (см. `_register`).
+        self._deferred: list[tuple[str, str, str]] | None = None
 
     # -- people discovered inside the documents themselves --------------------
 
@@ -654,6 +683,7 @@ class Detector:
         """
         norm = normalize(text)
         masked = norm.text
+        self._geo_spans = []
         if self.settings.organizations or self.settings.geo:
             self.entities.learn(norm.text)
             masked = self._mask_entities(norm.text)
@@ -664,8 +694,11 @@ class Detector:
         if not self.settings.learn_names:
             return 0
         tokens = tokenize(masked)
+        self._learn_abbreviations(tokens, masked)
+        self._drop_abbreviations(tokens)
         added = 0
         i = 0
+        self._deferred = []
         while i < len(tokens):
             consumed = self._harvest_at(tokens, i, masked)
             if consumed:
@@ -673,6 +706,9 @@ class Detector:
                 i += consumed
             else:
                 i += 1
+        deferred, self._deferred = self._deferred, None
+        for names in deferred:
+            self._register(*names)
         self._harvest_honorifics(tokens, masked)
         # Second sweep, after every full name in the text is known: whoever is left with only
         # initials gets an identity of their own so their mentions stay linked to each other.
@@ -692,6 +728,32 @@ class Detector:
                 self._register_initials(tokens[i + consumed].text, letters)
             i += length
         return added
+
+    # Сколько разных слов с заглавной должно стоять после слитной пары, чтобы считать её сокращением.
+    ABBREVIATION_EVIDENCE = 3
+
+    def _learn_abbreviations(self, tokens: list[Token], text: str) -> None:
+        """«ОП Тальжино», «ОП Кутаново», «ОП Берёзовка»: пара заглавных перед тремя разными словами — сокращение.
+
+        Инициалы одного человека стоят перед одной и той же фамилией; перед разными — это вид подразделения,
+        и считать его инициалами значит завести по «человеку» на каждое название.
+        """
+        for token, following in zip(tokens, tokens[1:]):
+            if not token.glued or following.initial or not following.text[:1].isupper():
+                continue
+            if text[token.end:following.start].strip(" \t "):
+                continue
+            seen = self._caps_followers[token.text]
+            seen.add(following.key)
+            if len(seen) >= self.ABBREVIATION_EVIDENCE:
+                self.abbreviations.add(token.text)
+
+    def _drop_abbreviations(self, tokens: list[Token]) -> None:
+        if not self.abbreviations:
+            return
+        for token in tokens:
+            if token.glued and token.text in self.abbreviations:
+                token.initial, token.letters, token.glued = False, (), False
 
     HONORIFICS = frozenset({
         "mr", "mrs", "ms", "miss", "mx", "dr", "prof", "sir", "madam", "г-н", "г-на", "г-ну", "г-ном", "г-не", "г-жа", "г-жи",
@@ -733,7 +795,9 @@ class Detector:
     def _mask_entities(self, text: str) -> str:
         """Названия организаций и мест не должны попадать в разбор ФИО: «Северный Ветер» — не человек."""
         # Справочные города («Иванова» — родительный от Иваново) не маскируются: это может быть фамилия.
-        spans = [(h.start, h.end) for h in self.entities.find(text)
+        hits = self.entities.find(text)
+        self._geo_spans = [(h.start, h.end) for h in hits if h.category in {"CITY", "REGION"}]
+        spans = [(h.start, h.end) for h in hits
                  if h.category in {"ORG", "PROJECT", "CITY", "REGION", "TERM"} and h.priority >= 680]
         if not spans:
             return text
@@ -880,6 +944,24 @@ class Detector:
         return surname, given, patronymic
 
     def _register(self, surname: str, given: str, patronymic: str) -> None:
+        if self._deferred is not None and surname.isascii() and given.isascii():
+            # Латинская запись ждёт конца прохода: к этому времени кириллическая строка того же человека уже заучена.
+            self._deferred.append((surname, given, patronymic))
+            return
+        if surname.isascii() and given.isascii():
+            near = {pid for pid in self.index.surname.get(fold(surname), set())
+                    if pid in self.index.people and not self.index.people[pid].surname.isascii()
+                    and self._close_to_given(pid, fold(given))}
+            if not near:
+                # «Demenstein Elena» при «Деменштейн Елена»: фамилию латиницей записали не по правилам транслитерации.
+                # Имя совпало, фамилия в двух правках от одного из написаний — тот же человек, если он такой один.
+                near = {pid for pid in self.index.given.get(fold(given), set())
+                        if pid in self.index.people and not self.index.people[pid].surname.isascii()
+                        and self._close_to_surname(pid, fold(surname))}
+                near = near if len(near) == 1 else set()
+            if near:
+                self.index.add_surfaces(near, surname, given, patronymic)
+                return
         raw = (surname, given, patronymic)
         surname, given, patronymic = self._to_nominative(surname, given, patronymic)
         if len(surname) < 2 or len(given) < 2:
@@ -943,6 +1025,7 @@ class Detector:
             # One tokenisation feeds all three name passes: scan() runs per cell and per
             # paragraph, so repeating the regex walk here is paid thousands of times over.
             tokens = tokenize(norm.text)
+            self._drop_abbreviations(tokens)
             candidates.extend(self._name_findings(tokens, norm, text, file, location))
             candidates.extend(self._rule_findings(norm, text, file, location, PII_RULES))
             candidates.extend(self._lone_date(norm, text, file, location))
@@ -953,6 +1036,7 @@ class Detector:
         found = self._resolve(candidates, text, file, location)
         if self.settings.personal_data:
             found = self._complete_unit_name(found, norm, text, file, location)
+            found = self._complete_list_names(found, norm, text, file, location)
         keep = self.entities.keep
         if keep:
             found = [f for f in found if fold(f.original) not in keep]
@@ -1005,9 +1089,97 @@ class Detector:
                             reason="Столбец с ФИО" if hinted else "Ячейка целиком похожа на ФИО")
         return sorted([f for f in found if f not in inside] + [merged], key=lambda f: (f.start, -(f.end - f.start)))
 
+    LIST_ITEM = re.compile(r"[^;,\n]+")
+
+    def _complete_list_names(self, found, norm, text, file, location):
+        """Список людей через «;», «,» или перевод строки: «Иванов И.И.; Калина Д.В.; Орлов, Соколова».
+
+        Когда хотя бы два пункта списка уже опознаны людьми (или столбец назван «ФИО»), остальные короткие пункты того же
+        вида — фамилия в любом падеже, «Слово И.О.», пара, отложенная на проверку, — тоже люди, даже если фамилия
+        совпадает с обычным словом. Без соседей такие слова так и остаются на ручной проверке.
+        """
+        body = norm.text
+        if not any(sep in body for sep in ";,\n"):
+            return found
+        persons = [f for f in found if f.category == "PERSON" and f.decision == Decision.AUTO]
+        hinted_cell = fold(body.strip()) in self.person_values
+        if len(persons) < 2 and not hinted_cell and not self.person_values:
+            return found
+        items: list[tuple[int, int]] = []
+        for m in self.LIST_ITEM.finditer(body):
+            start, end = m.start(), m.end()
+            colon = body.rfind(":", start, end)
+            if colon >= 0:
+                start = colon + 1          # «Участники: Иванов» — подпись перед двоеточием не пункт списка
+            while start < end and body[start].isspace():
+                start += 1
+            while end > start and body[end - 1].isspace():
+                end -= 1
+            if end > start + 1 and body[end - 1] == "." and body[end - 2].islower():
+                end -= 1                   # точка в конце предложения, а не после инициала
+            if end - start >= 3:
+                items.append((start, end))
+        if len(items) < 2:
+            return found
+        spans = [norm.to_original(start, end) for start, end in items]
+        confirmed = 0
+        for (start, end), (nstart, nend) in zip(spans, items):
+            if any(f.start >= start and f.end <= end for f in persons) or fold(body[nstart:nend]) in self.person_values:
+                confirmed += 1
+        if confirmed < 2 and not hinted_cell:
+            return found
+        promoted = []
+        for (start, end), (nstart, nend) in zip(spans, items):
+            if end <= start or any(f.decision == Decision.AUTO and f.start < end and start < f.end for f in found):
+                continue
+            inside = [f for f in found if f.start < end and start < f.end]
+            flagged = any(f.category == "POSSIBLE_PERSON" and f.start <= start and f.end >= end
+                          and f.reason != "Возможная опечатка в фамилии" for f in inside)
+            if not flagged and not self._list_person_shape(body[nstart:nend], nstart):
+                continue
+            ids = self.index.surname.get(fold(body[nstart:nend]), set())
+            person_id = self.resolve_person(next(iter(ids))) if len(ids) == 1 else None
+            promoted.append((start, end, person_id))
+        if not promoted:
+            return found
+        for start, end, _ in promoted:
+            found = [f for f in found if not (f.start < end and start < f.end)]
+        found.extend(self._make("PERSON", start, end, text, file, location, Decision.AUTO, .88, person_id=person_id,
+                                reason="Фамилия в списке людей") for start, end, person_id in promoted)
+        return sorted(found, key=lambda f: (f.start, -(f.end - f.start)))
+
+    def _list_person_shape(self, item: str, offset: int) -> bool:
+        """Пункт списка сам по себе похож на человека: одна фамилия в любом падеже или «Слово И.О.» с точками."""
+        tokens = tokenize(item)
+        if not tokens or len(tokens) > 3:
+            return False
+        head = tokens[0]
+        word = head.text
+        if head.initial or len(word) < 3 or not name_capitalised(word) or word.isupper() or not self._cyrillic(word):
+            return False
+        if mo.is_stop_word(word) or head.key in self.ROLE_MARKERS:
+            return False
+        if any(start < offset + head.end and offset + head.start < end for start, end in self._geo_spans):
+            return False
+        rest = tokens[1:]
+        if not rest:
+            info = lexicon.shape(word)
+            # «Сибирский», «Центральной» — прилагательное с полным окончанием; «Сомов» (краткая форма) — фамилия.
+            adjective = (head.key.endswith(("ий", "ый", "ая", "яя", "ое", "ее", "ые", "ие") + self.ADJECTIVE_OBLIQUE)
+                         and info.known and not info.surname and info.lemma.endswith(("ий", "ый", "ой")))
+            return (mo.looks_like_surname_inflected(word) and not mo.is_given_name(word)
+                    and not self._toponym_shaped(word, info) and not adjective)
+        if len(rest) == 1 and not rest[0].initial:
+            # «Лоури Геннадий»: два слова с заглавной, одно из них — имя, второе не обиходное слово.
+            other = rest[0].text
+            return any(mo.is_given_name(a) and self._bare_name_word(b, a) for a, b in ((word, other), (other, word)))
+        return all(len(t.text) == 1 and t.initial and not t.weak and t.end > t.start + 1 for t in rest)
+
     def _entity_findings(self, norm, text, file, location):
         out = []
-        for hit in self.entities.find(norm.text):
+        hits = self.entities.find(norm.text)
+        self._geo_spans = [(h.start, h.end) for h in hits if h.category in {"CITY", "REGION"}]
+        for hit in hits:
             start, end = norm.to_original(hit.start, hit.end)
             if end <= start:
                 continue
@@ -1115,7 +1287,11 @@ class Detector:
             owner = self.spelling_owner.get(fold(text[start:end]))
             if owner:
                 ids = {owner}
-            if len(ids) == 1:
+            if not ids:
+                # Фамилия узнана, а соседнее имя не подошло никому: пара скрывается отдельной меткой.
+                out.append((PRIORITY["PERSON"], self._make("PERSON", start, end, text, file, location,
+                                                           Decision.AUTO, confidence, reason=reason)))
+            elif len(ids) == 1:
                 person_id = self.resolve_person(next(iter(ids)))
                 out.append((PRIORITY["PERSON"], self._make("PERSON", start, end, text, file, location,
                                                            Decision.AUTO, confidence, person_id=person_id, reason=reason)))
@@ -1167,6 +1343,10 @@ class Detector:
             token = tokens[start + consumed]
             if not token.initial or (token.weak and not allow_weak):
                 break
+            # «Петров А.. ДВ - Сидоров Д.»: склеенная пара после инициала — уже метка подразделения, а не отчество,
+            # и токен, который не помещается в лимит целиком, чужой: трёх инициалов у имени не бывает.
+            if letters and (token.glued or len(letters) + len(token.letters) > limit):
+                break
             letters.extend(token.letters)
             consumed += 1
         return consumed, tuple(letters[:limit])
@@ -1182,7 +1362,12 @@ class Detector:
                                      or mo.looks_like_surname_inflected(previous.text)):
             return False
         tail = tokens[i + consumed]
-        return "\n" not in text[tokens[i + consumed - 1].end:tail.start]
+        # «Leonid V. Vyazkov»: слева имя того же человека — инициал здесь отчество, а не начало нового имени.
+        if previous is not None and self._lookup(self.index.given, previous) & self._lookup(self.index.surname, tail):
+            return False
+        # «Метла Д.В.; Жаров А.А.»: после точки с запятой начинается другой пункт, инициалы остались в предыдущем.
+        gap = text[tokens[i + consumed - 1].end:tail.start]
+        return "\n" not in gap and not any(sep in gap for sep in ";,|")
 
     def _match_initials(self, ids: set[str], letters: tuple[str, ...]) -> set[str]:
         for slot, letter in enumerate(letters[:2]):
@@ -1234,6 +1419,11 @@ class Detector:
         t0 = tokens[i]
         t1 = tokens[i + 1] if remaining > 1 else None
         t2 = tokens[i + 2] if remaining > 2 else None
+        # ФИО не переходит через границу пункта списка: «Сур Игорь; Камышанский Игорь» — «Игорь; Камышанский» не пара.
+        if t1 is not None and self._list_break(t0, t1, text):
+            t1 = t2 = None
+        elif t2 is not None and self._list_break(t1, t2, text):
+            t2 = None
 
         if t1 is not None and t2 is not None and not (t0.initial or t1.initial or t2.initial):
             ids = self._lookup(self.index.surname, t0) & self._lookup(self.index.given, t1) & self._lookup(self.index.patronymic, t2)
@@ -1242,6 +1432,17 @@ class Detector:
             ids = self._lookup(self.index.given, t0) & self._lookup(self.index.patronymic, t1) & self._lookup(self.index.surname, t2)
             if ids:
                 return 3, ids, .995, "Полное ФИО"
+
+        # «Leonid V. Vyazkov»: имя, инициал отчества и фамилия — так пишут по-английски. Без этого правила имя уходило
+        # к тёзке по правилу одиночного имени, а «V. Vyazkov» заводил ещё одного человека.
+        if t1 is not None and t1.initial and not t0.initial:
+            consumed, letters = self._collect_initials(tokens, i + 1)
+            tail = tokens[i + 1 + consumed] if i + 1 + consumed < len(tokens) else None
+            if len(letters) == 1 and tail is not None and not tail.initial:
+                ids = self._lookup(self.index.given, t0) & self._lookup(self.index.surname, tail)
+                ids = self._by_initial(ids, letters[0], 1)
+                if ids:
+                    return 2 + consumed, ids, .96, "Имя, инициал и фамилия"
 
         if not t0.initial:
             known = self._lookup(self.index.surname, t0)
@@ -1272,6 +1473,10 @@ class Detector:
             ids = self._lookup(self.index.given, t0) & self._lookup(self.index.patronymic, t1)
             if ids:
                 return 2, ids, .97, "Имя и отчество"
+            if t0.text.isascii() and t1.text.isascii():
+                latin = self._latin_fio(tokens, i, text)
+                if latin:
+                    return latin
 
         # Три буквы, а не четыре: здесь слово уже совпало с фамилией человека, которого
         # программа встретила в этом же документе. Порог в четыре буквы означал, что
@@ -1294,9 +1499,85 @@ class Detector:
                     and (t0.text.isascii() or mo.is_given_name(t0.text)) and mo.is_given_name(t0.text)
                     and not lexicon.is_common_word(t0.text) and t0.key not in self.index.surname):
                 person = self.index.people.get(next(iter(ids)))
-                if person is not None and person.given_name and len(person.given_name) >= 3:
+                if (person is not None and person.given_name and len(person.given_name) >= 3
+                        and not self._foreign_neighbour(tokens, i, text, person.person_id)):
                     return 1, ids, .82, "Имя человека, названного в документе"
         return None
+
+    @staticmethod
+    def _list_break(left: Token, right: Token, text: str) -> bool:
+        # Перевод строки границей не считается: в ячейке длинное ФИО переносится на вторую строку.
+        return bool(text) and any(sep in text[left.end:right.start] for sep in ";|•")
+
+    def _latin_fio(self, tokens: list[Token], i: int, text: str) -> tuple[int, set[str], float, str] | None:
+        """«Barabanov Aleksander», «Medvedev Eugeniy»: фамилия латиницей узнана, а имя записано не так, как его даёт
+        транслитерация (лишняя буква, «Eu-» вместо «Ev-», опечатка). Имя в пределах двух правок от написаний имени
+        этого человека — это он; из однофамильцев выбирается тот, чьё имя совпало. Если не совпало ни у кого, пара
+        всё равно скрывается целиком отдельной меткой: оставить рядом с замаскированной фамилией имя открытым нельзя.
+        """
+        t0, t1 = tokens[i], tokens[i + 1]
+        if text and text[t0.end:t1.start].strip(" \t "):
+            return None
+        for surname, name in ((t0, t1), (t1, t0)):
+            ids = self._lookup(self.index.surname, surname)
+            if not ids or not self._latin_name_word(name) or name.key in self.index.surname:
+                continue
+            near = {pid for pid in ids if self._close_to_given(pid, name.key)}
+            if near:
+                return 2, near, .9, "Фамилия и имя латиницей"
+            if surname is t0 and not self._continues_capitalised(tokens, i, text) \
+                    and any(self.index.people[pid].given_name for pid in ids if pid in self.index.people):
+                return 2, set(), .85, "Фамилия латиницей рядом с именем"
+        # Имя узнано, а фамилия записана не по правилам («Lavrenchyk Evgenia»): тот же человек, если он такой один.
+        for surname, name in ((t0, t1), (t1, t0)):
+            ids = self._lookup(self.index.given, name)
+            if not ids or len(ids) > 200 or not self._latin_name_word(surname) or surname.key in self.index.given:
+                continue
+            near = {pid for pid in ids if self._close_to_surname(pid, surname.key)}
+            if len(near) == 1:
+                return 2, near, .88, "Фамилия и имя латиницей"
+        return None
+
+    def _close_to_given(self, person_id: str, key: str) -> bool:
+        person = self.index.people.get(person_id)
+        if person is None or not person.given_name or len(key) < 3:
+            return False
+        limit = 2 if len(key) >= 5 else 1
+        return any(_edit_distance(key, fold(form), limit) <= limit
+                   for form in mo.transliterate(person.given_name) | {person.given_name})
+
+    def _close_to_surname(self, person_id: str, key: str) -> bool:
+        person = self.index.people.get(person_id)
+        if person is None or not person.surname or len(key) < 4:
+            return False
+        limit = 2 if len(key) >= 6 else 1
+        return any(_edit_distance(key, fold(form), limit) <= limit for form in mo.transliterate(person.surname))
+
+    def _foreign_neighbour(self, tokens: list[Token], i: int, text: str, person_id: str) -> bool:
+        """Рядом с именем стоит чужая фамилия: «Сур Игорь» — не тот Игорь, что назван в документе полностью.
+
+        Правило «имя без фамилии — единственный человек с таким именем» годится только для одинокого имени.
+        Слово с заглавной вплотную к нему (через пробел), которое не обиходное и не часть ФИО этого человека,
+        — это его собственная фамилия, и привязка к тёзке слила бы двух разных людей в один токен.
+        """
+        for j in (i - 1, i + 1):
+            if not 0 <= j < len(tokens):
+                continue
+            other = tokens[j]
+            left, right = (other, tokens[i]) if j < i else (tokens[i], other)
+            gap = text[left.end:right.start] if text else " "
+            if gap.strip(" \t ") or other.initial or len(other.text) < 2 or not name_capitalised(other.text):
+                continue
+            if other.text.isupper() or mo.is_stop_word(other.text) or mo.is_common_word(other.text):
+                continue
+            shape = lexicon.shape(other.text)
+            if shape.lexical and shape.known and not shape.surname:
+                continue            # «Уважаемая Мария», «Привет Мария»: обиходное слово рядом не мешает
+            if any(person_id in table.get(other.key, ()) for table in
+                   (self.index.surname, self.index.given, self.index.patronymic)):
+                continue
+            return True
+        return False
 
     # -- names that are not in any directory ----------------------------------
 
@@ -1362,7 +1643,7 @@ class Detector:
         parked for review — otherwise a file that only ever abbreviates names would ship clean.
         """
         head = tokens[i]
-        if not head.initial and self._surname_like(head):
+        if not head.initial and (self._surname_like(head) or self._common_before_initials(tokens, i)):
             consumed, letters = self._collect_initials(tokens, i + 1)
             # Две заглавные без точек — это чаще аббревиатура (АО, ОК, РФ), чем инициалы.
             # Принимаем их, только когда фамилия уже известна по надёжной форме.
@@ -1370,6 +1651,8 @@ class Detector:
                     and not mo.looks_like_surname_inflected(head.text)):
                 return None
             if letters and not self._same_script(head.text, tokens[i + 1].text):
+                return None
+            if consumed and tokens[i + 1].glued and self._place_not_person(head):
                 return None
             # Фамилия может быть известна, но с другими инициалами: это однофамилец, и накрыть
             # надо всю форму — иначе совпадёт одна фамилия, а инициалы останутся открытыми.
@@ -1380,6 +1663,7 @@ class Detector:
             consumed, letters = self._collect_initials(tokens, i)
             tail = tokens[i + consumed] if i + consumed < len(tokens) else None
             if (letters and tail is not None and not tail.initial and self._surname_like(tail)
+                    and not (head.glued and self._place_not_person(tail))
                     and not self._match_initials(self._lookup(self.index.surname, tail), letters)
                     and self._leading_initials_ok(tokens, i, consumed, text)):
                 return consumed + 1, "Инициалы с фамилией вне справочника"
@@ -1391,6 +1675,30 @@ class Detector:
             # Имя может быть знакомым по другому человеку («Ольга Викторовна» ≠ «Ольга Николаевна»): важна пара целиком.
             return 2, "Имя и отчество вне справочника"
         return None
+
+    def _common_before_initials(self, tokens: list[Token], i: int) -> bool:
+        """«Калина Д.В.»: фамилия-омоним обычного слова, за которой стоят два инициала с точками.
+
+        Обычное слово словарь отвергает раньше, чем правило успевает посмотреть на инициалы. Два инициала с точками —
+        довод сильный, но «Логист А.П.» и «Поставка К.Т.» (заголовок ячейки и чьи-то инициалы) выглядят так же,
+        поэтому слово обязано ещё и иметь фамильное окончание и не быть служебным или названием должности.
+        """
+        head = tokens[i]
+        word = head.text
+        if head.labelled or len(word) < 3 or not name_capitalised(word) or word.isupper() or not self._cyrillic(word):
+            return False
+        if mo.is_stop_word(word) or head.key in self.ROLE_MARKERS or not mo.looks_like_surname_inflected(word):
+            return False
+        pair = tokens[i + 1:i + 3]
+        return len(pair) == 2 and all(len(t.text) == 1 and t.initial and not t.weak and not t.glued
+                                      and t.end > t.start + 1 for t in pair)
+
+    def _place_not_person(self, token: Token) -> bool:
+        """Слово рядом со слитной парой заглавных («ОП Тальжино») — место: его нашёл разбор мест или у него окончание
+        названия села. Две заглавные без точек слишком слабый довод, чтобы спорить с этим."""
+        if any(start < token.end and token.start < end for start, end in self._geo_spans):
+            return True
+        return self._toponym_shaped(token.text, lexicon.shape(token.text))
 
     @staticmethod
     def _surname_like(token: Token) -> bool:
@@ -1476,6 +1784,11 @@ class Detector:
         # Шпак». Довод слабее — отсюда и оценка ниже, и обязательная ручная проверка.
         if known[0] and self._plausible_surname(texts[1]):
             return 2, .70, "Возможное ФИО вне справочника"
+        # «Лоури Геннадий», «Сур Игорь»: редкая фамилия без фамильного окончания рядом с именем. Второе слово не обиходное
+        # и не служебное — иначе «Игорь Приказ» и «Отдел Павел» стали бы людьми.
+        for slot in (0, 1):
+            if known[slot] and self._bare_name_word(texts[1 - slot], texts[slot]):
+                return 2, .70, "Возможное ФИО вне справочника"
         # Пара «слово-на-ова + слово-на-ов» без имени рядом опознанию не поддаётся: «Снова
         # Смирнов» и «Причина Иванова» выглядят так же, как две настоящие фамилии подряд.
         # Такая находка давала больше шума в ручной проверке, чем пользы.
@@ -1564,6 +1877,13 @@ class Detector:
         if token.key in self.index.surname:
             return "", 0.
         info = lexicon.shape(word)
+        # «Директор Кузбасского филиала», «Начальник Коммерческого отдела»: прилагательное при названии подразделения,
+        # а не фамилия. Одна такая находка отравляла хранилище — «Коммерческого» заменялось как человек во всех файлах.
+        if self._unit_adjective(tokens, i, text, info):
+            return "", 0.
+        # «Тальжино», «Кольцово»: название села, а не фамилия, если словарь не знает его фамилией.
+        if self._toponym_shaped(word, info):
+            return "", 0.
         actor = len(tokens) == 1 or self._person_context(tokens, i)
         role = self._role_context(tokens, i)
         if not info.surname:
@@ -1600,6 +1920,39 @@ class Detector:
         # Довод слабее контекстного — отсюда и оценка ниже. Решение в обоих случаях одно:
         # ручная проверка. Автозамена по одному только виду слова изуродовала бы документ.
         return "Одиночная фамилия вне справочника", .55
+
+    # Косвенные окончания прилагательного и названия подразделений, перед которыми оно стоит.
+    ADJECTIVE_OBLIQUE = ("ого", "его", "ому", "ему", "ой", "ей", "ым", "им", "ом", "ем", "ую", "юю", "ых", "их")
+    UNIT_NOUNS = ("филиал", "департамент", "отдел", "завод", "офис", "участк", "участок", "цех", "склад", "управлен",
+                  "служб", "подразделен", "направлен", "дивизион", "регион", "сектор", "центр", "бюро", "комбинат",
+                  "представительств", "дирекци", "лаборатори", "хозяйств", "терминал", "площадк", "предприяти",
+                  "производств", "магазин", "комплекс", "округ", "район", "област", "станци", "холдинг", "компани")
+    UNIT_WORDS = frozenset({"край", "края", "краю", "краем", "крае", "база", "базы", "базе", "базу", "базой",
+                            "блок", "блока", "блоку", "блоком", "группа", "группы", "группе", "группу", "группой"})
+
+    def _unit_adjective(self, tokens: list[Token], i: int, text: str, info) -> bool:
+        """Прилагательное в косвенном падеже, а не фамилия: следом название подразделения, или словарь знает слово
+        только прилагательным, или оно образовано от известного города/региона («Кузбасского», «Московского»)."""
+        word = tokens[i].key
+        if len(word) < 5 or not word.endswith(self.ADJECTIVE_OBLIQUE):
+            return False
+        following = tokens[i + 1] if i + 1 < len(tokens) else None
+        if following is not None and "\n" not in text[tokens[i].end:following.start]:
+            if following.key in self.UNIT_WORDS or following.key.startswith(self.UNIT_NOUNS):
+                return True
+        if info.surname and info.known:
+            return False           # «Директор Троицкого»: словарь знает фамилию, соседа-подразделения нет
+        if info.known and info.lemma.endswith(("ий", "ый", "ой")):
+            return True            # «Директор Технического»: словарное прилагательное
+        if not re.search(r"[сц]к(?:ого|ому|им|ом|ой|ую|их|ими)$", word):
+            return False
+        adj_of_city = getattr(EntityRecognizer, "_adj_of_city", None)
+        return bool(adj_of_city and adj_of_city(tokens[i].text))
+
+    @staticmethod
+    def _toponym_shaped(word: str, info) -> bool:
+        """Окончание названий сёл и посёлков (-ово/-ево/-ино/-ыно), а словарь фамилией слово не знает."""
+        return len(word) >= 5 and fold(word).endswith(("ово", "ево", "ёво", "ино", "ыно")) and not (info.surname and info.known)
 
     @staticmethod
     def _reduces_to_a_surname(word: str, info) -> bool:
@@ -1725,6 +2078,18 @@ class Detector:
         if not word[0].isupper() or not word[1:].islower():
             return False
         return fold(word) not in cls.LATIN_NON_NAMES
+
+    @classmethod
+    def _bare_name_word(cls, word: str, given: str) -> bool:
+        """Слово рядом с известным именем, которое ничем, кроме имени собственного, быть не может.
+
+        Второе имя не мешает: «Лоури Геннадий» — фамилия, которую словарь достраивает как имя, рядом с настоящим именем.
+        """
+        if len(word) < 3 or not word[0].isupper() or word.isupper() or not (cls._cyrillic(word) and cls._cyrillic(given)):
+            return False
+        if mo.is_stop_word(word) or mo.looks_like_patronymic(word) or mo.is_common_word(word):
+            return False
+        return not lexicon.shape(word).lexical
 
     @staticmethod
     def _plausible_surname(word: str) -> bool:

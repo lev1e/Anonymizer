@@ -9,3 +9,4 @@ packaging/MicrosoftEdgeWebview2Setup.exe
 # Реальные документы для ручной проверки: содержат данные клиента, в репозиторий не попадают.
 case/
 .claude/
+.venv-mac/

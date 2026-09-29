@@ -30,11 +30,15 @@ from .tokens import EMAIL_TOKEN_RE, TOKEN_RE
 P_TERM = 1100
 P_EXPLICIT = 950
 P_KNOWN = 940
-P_DOMAIN = 820
+# Адрес сайта целиком выше известного названия: в `www.site.com/press/brand-news` название внутри ссылки не должно
+# разрезать адрес и оставить домен открытым. Ниже email (960): домен почты — часть адреса.
+P_DOMAIN = 945
 P_FILE = 780
+P_REPEATED = 660         # строгий режим: повторяющееся несловарное название
 P_GEO = 650
 P_GEO_KNOWN = 680
 P_GEO_EXPLICIT = 690     # ниже адреса (700): город внутри адреса не должен дробить адрес на части
+P_COUNTRY = 650          # ниже компании: «Россия» внутри названия компании заменяется вместе с названием
 
 WORD = re.compile(r"[^\W_]+(?:[.\-'’][^\W_]+)*", re.UNICODE)
 CAP = r"[A-ZА-ЯЁ][\w\-]*"
@@ -85,14 +89,47 @@ QUOTED = re.compile(r"«(?P<n>[^«»\n]{2,70}?)»|[“„\"](?P<m>[^«»“”�
 # Полное название с сокращением в скобках: «Технологии Доверия (ТеДо)».
 ABBREVIATION = re.compile(rf"(?P<full>{CAP}(?: +{CAP}){{1,4}}) *\((?P<abbr>[A-ZА-ЯЁ][\w\-]{{1,11}})\)")
 
+# Слово, после которого несловарное слово с заглавной — название сервиса или компании: «портал ELMA», «вендор Грантек».
+SERVICE_CUE = re.compile(
+    r"(?<![\w])(?P<c>(?i:портал\w{0,2}|сервис\w{0,2}|платформ\w{1,2}|вендор\w{0,2}|поставщик\w{0,2}|подрядчик\w{0,2}))"
+    r"[ \t]+(?P<n>[A-ZА-ЯЁ][\w\-]*(?: [A-Z][\w\-]*)?)")     # без перевода строки: соседняя ячейка — другой текст
+# Название с родовым словом в конце: «Сумитек Групп», «Вектрон Холдинг», «Ангарский Грантек Завод».
+ORG_TRAILING_NOUN = re.compile(
+    r"(?<![\w\-])(?P<n>(?:[A-ZА-ЯЁ][\w\-]* +){1,3}(?:Компани[яиюей]|Корпораци[яиюей]|Групп[аыеуой]?|Холдинг\w{0,2}|"
+    r"Завод\w{0,2}|Банк\w{0,2}|Комбинат\w{0,2}|Объединени[еяю]\w{0,2}))(?![\w\-])")
+ORG_NOUN_PREFIXES = ("компани", "корпораци", "групп", "холдинг", "завод", "банк", "комбинат", "объединени")
+
+# Разделители пунктов перечня: запятая, точка с запятой, черта, скобки, двоеточие, союз «и».
+SIBLING_SPLIT = re.compile(r"\s*(?:[,;|/:()]|\s(?:и|and|&)\s)\s*")
+# «ex-» после нормализации смешанных алфавитов может стать кириллическим «ех-».
+_ITEM_PREFIX = re.compile(r"^(?:ex-|ех-|экс-|бывш\.\s*|(?:" + _LEGAL_RU + r")\s+)", re.I)
+
 CITY_INTRO = re.compile(
-    rf"(?<![\w.])(?:г\. ?|гор\. ?|город(?:а|е|у|ом)? +|пос\. ?|поселок +|посёлок +|пгт +|п/ст +|"
-    rf"п\. ?|станица +|ст-ца +|хутор +|село +|деревня +|ОП +)"
-    rf"(?P<n>[А-ЯЁ][а-яё]+(?:-[А-ЯЁа-яё]+){{0,3}}(?: +[А-ЯЁ][а-яё]+)?)")
+    rf"(?<![\w.])(?<!т\. )(?:г\. ?|гор\. ?|город(?:а|е|у|ом)? +|пос\. ?|пос[её]л(?:ок|ка|ке|ком) +|пгт\.? ?|рп\.? ?|"
+    rf"п/ст +|п\. ?|с\. ?|д\. ?|дер\. ?|ст\. ?|станиц(?:а|ы|е|у) +|ст-ца +|хутор(?:а|е)? +|сел(?:о|а|е|ом) +|"
+    rf"деревн(?:я|и|е|ю) +|аул +|ОП +|р-не +|районе +)"
+    rf"(?P<n>[А-ЯЁ][а-яё]+(?:-[А-ЯЁа-яё]+){{0,3}}(?: +[А-ЯЁ][а-яё]+)?|[А-ЯЁ]{{2,}}(?:-[А-ЯЁ]{{2,}}){{0,2}}(?![\w\-]))")
+# «г. Yichang», «город Wuhan»: город латиницей после явного слова «город».
+LATIN_CITY_INTRO = re.compile(r"(?<![\w.])(?:г\. ?|город(?:а|е|у|ом)? +|city of +)(?P<n>[A-Z][a-z]+(?:[ \-][A-Z][a-z]+)?)(?![\w\-])")
+# Слова-метки подразделения или площадки, после которых прилагательное — название места: «сервис Олекминский».
+UNIT_LABEL_WORDS = frozenset("""сервис склад участок филиал поле цех оп база площадка подразделение отделение офис карьер
+разрез рудник месторождение""".split())
+# «Регион: Северо-Западный», «Федеральный округ — Уральский»: прилагательное-регион как значение подписи.
+REGION_LABEL = re.compile(
+    r"(?<![\w\-])(?i:регион|макрорегион|(?:федеральный\s+)?округ|территория|дивизион)\s*[:\-–—]?\s+"
+    r"(?P<n>[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?(?:ский|ской|цкий|ный|ний|ская|ное|ная))(?![\w\-])")
+# Сокращения перед названием, которые означают и другое: «п. 3» — пункт, «с.»/«ст.»/«д.» — страница, статья, дом;
+# «в районе» — «около». После них берём только слово, не совпадающее с обычным словом словаря.
+_AMBIGUOUS_INTROS = frozenset({"п.", "п", "с.", "с", "д.", "д", "ст.", "ст", "районе", "р-не"})
 REGION_ADJ_HEAD = re.compile(
-    r"(?<![\w])(?P<n>[А-ЯЁ][а-яё]+(?:-[а-яё]+)?(?:ской|ская|ский|ского|ском|скую|ским|цкой|цкая|цкий|ной|ная|ный|"
-    r"овой|овая|овый|инской|инская|инский)) +(?:обл\b\.?|области|областью|область|край|края|краю|республика|"
-    r"республики|республике|округ|округа|округе|район|района|районе)")
+    r"(?<![\w])(?!(?:Федеральн|Автономн|Муниципальн|Городск|Сельск|Административн)\w)"
+    r"(?P<n>[А-ЯЁ][а-яё]+(?:-[А-ЯЁа-яё][а-яё]+)?(?:ской|ская|ский|ского|ском|скую|ским|цкой|цкая|цкий|ной|ная|ный|"
+    r"ного|ном|ному|ным|овой|овая|овый|инской|инская|инский)) +(?:федеральн\w{2,3} +)?(?:обл\b\.?|области|областью|область|"
+    r"край|края|краю|крае|республика|республики|республике|округ|округа|округе|округу|ФО\b|район|района|районе|р-н\w*|"
+    r"улус|улуса|улусе)")
+# «р-н Беловский», «район Беловский»: вид территории перед прилагательным.
+REGION_HEAD_ADJ = re.compile(
+    r"(?<![\w\-])(?:р-н[а-я]*\.?|район[а-я]?|улус[а-я]?) +(?P<n>[А-ЯЁ][а-яё]+(?:ский|цкий|ского|цкого|ском|цком|ской|цкой))(?![\w])")
 REPUBLIC = re.compile(r"(?<![\w])Республика +(?P<n>[А-ЯЁ][а-яё]+(?:-[А-ЯЁа-яё]+)?(?: +[А-ЯЁ][а-яё]+)?)")
 BRANCH_ADJ = re.compile(
     rf"(?<![\w])(?P<n>[А-ЯЁ][а-яё]+(?:-[А-ЯЁа-яё]+)?(?:ский|ой|ий|ый|ая|ое|ского|ской|ском|ской)) +"
@@ -120,7 +157,11 @@ ENDINGS = ("а", "у", "е", "ы", "и", "ом", "ем", "ой", "ей", "ам",
 ADJECTIVE_CORE = re.compile(r"^.{3,}(?:ский|цкий|ный|ний|ой|ый|ий|ая|яя|ое|ее)$", re.I)
 ADJECTIVE_ENDINGS = ("ий", "ый", "ой", "ого", "его", "ому", "ему", "им", "ым", "ом", "ем", "ая", "яя", "ей", "ую", "юю",
                      "ое", "ее", "ые", "ие", "ых", "их", "ими", "ыми")
+# Любой падеж прилагательного-топонима: «Беловском», «Северо-Западного», «Иркутской».
+ADJECTIVE_FORM = re.compile(r"^.{2,}(?:[сц]к|н|ов|ин)(?:ий|ый|ой|ого|его|ому|ему|ом|ем|им|ым|ая|яя|ую|юю|ое|ее|ие|ые|их|ых|ей)$", re.I)
 SPACE = re.compile(r"\s+")
+LATIN_RUN = re.compile(r"(?<![\w\-.@/])[A-Z][A-Za-z&\-']*(?: [A-Z][A-Za-z&\-']*)+(?![\w\-])")
+STRONG_SUGGESTION = .65          # подсказка, которую не стоит пропускать: сервис показывает её среди важных
 
 # Сокращения, которые в деловом тексте встречаются постоянно и названием компании не бывают.
 LATIN_COUNTRIES = frozenset("""china russia usa america europe asia africa germany france italy spain japan korea india brazil
@@ -130,7 +171,7 @@ moscow""".split())
 ACRONYM_STOP = frozenset(fold(w) for w in """
 ООО АО ПАО ЗАО НДС ИНН КПП ОГРН ФИО ФЗ ГК РФ США ЕС ООН СНГ ИТ КПЭ КПЭ ЕБИТДА ТЗ ТК ЖКХ ГОСТ СНИП ТУ ПО ОС НМА ОЗ
 ДЗ КЗ БДР БДДС ОПУ ОПР ДДС ЕРП ЦФО НП ТМЦ ТСД ЗУП ДА НЕТ ВСЕГО ИТОГО ПРОЧЕЕ ФОТ ЗП ДМС ОМС ПФР ФСС ФНС ЕГРЮЛ ЕГРИП ИП
-ДОГОВОР ПРИЛОЖЕНИЕ ФИЛИАЛ ОТДЕЛ ЦЕХ СКЛАД ГЭС ТЭС ТЭЦ АЭС ФО МСК СПБ СПБ ЛС КВ ДВФ СЗФ
+ДОГОВОР ПРИЛОЖЕНИЕ ФИЛИАЛ ОТДЕЛ ЦЕХ СКЛАД ГЭС ТЭС ТЭЦ АЭС ФО МСК СПБ СПБ ЛС КВ
 KPI ERP CRM IT PDF XML CSV API SLA OKR NPV IRR ROI ROE ROA CAPEX OPEX EBITDA WACC FMCG B2B B2C SKU MVP
 """.split())
 
@@ -252,9 +293,17 @@ class EntityRecognizer:
         self._by_lemmas: dict[tuple[str, ...], Entity] = {}
         self._max_words = 1
         self._domains: dict[str, Entity] = {}
+        self._surface: dict[str, Entity] = {}           # написание → объект (у мест ключ — начальная форма)
         self.keep = {fold(t) for t in (keep_terms or []) if t.strip()}
         self.suggestions: dict[str, dict] = {}
         self._pending_alias: dict[str, str] = {}
+        self._pending_heads: list[tuple[str, str]] = []   # (прилагательное-регион, слово после него: филиал, округ, край)
+        self._label_forms: dict[str, set[str]] = {}       # «СФ», «ДВ», «СИБ» → ключи мест, которые так сокращают
+        self._place_prefixes: dict[str, int] = {}         # «Сервис» в «Сервис Красноярск» → сколько раз перед местом
+        self._repeated: set[str] = set()                   # слова-названия, встреченные в документе не раз
+        self._lower_words: set[str] = set()                # слова, которые в документе пишут строчными
+        self._pending_links: dict[str, str] = {}           # «(Хейнекен)» после компании → ключ этой компании
+        self._explicit_orgs = False                        # есть ли компании, опознанные в документах явно
         if self._on("organizations"):
             for name in sorted(geo.KNOWN_ORGS):
                 original = self._original_spelling(name)
@@ -285,6 +334,10 @@ class EntityRecognizer:
         core = core.strip(" \t«»“”„\"'")
         if len(core) < 2:
             return None
+        if key is None and kind in {"CITY", "REGION"}:
+            # Город и регион — один объект во всех падежах и в виде прилагательного: «Красноярске» и «Красноярск»,
+            # «Иркутской» и «Иркутская», «Сибирский» и «Сибирь» получают одну метку с разными номерами написания.
+            key = self._place_key(kind, core)
         key = key or entity_key(core)
         if not key or key in self.keep or fold(core) in self.keep:
             return None
@@ -294,18 +347,86 @@ class EntityRecognizer:
         if entity is None:
             entity = Entity(kind, key, [], explicit, _ordinary(core))
             self.entities[key] = entity
+        self._surface[fold(core)] = entity
+        if entity.explicit and entity.kind == "ORG":
+            self._explicit_orgs = True
         if core in entity.forms:
             return entity
         entity.add(core)
         self._index(entity, core)
+        if entity.kind in {"CITY", "REGION"}:
+            self._place_forms(entity, core)
+        # Обиходное слово («Мост», «Простор») латиницей совпадает с английским словом: его не транслитерируем.
+        if entity.explicit and not entity.ordinary and entity.kind in {"ORG", "PROJECT", "CITY"} and not core.isascii():
+            for latin in transliterations(core):
+                if latin not in entity.forms and fold(latin) not in self.entities:
+                    entity.add(latin)
+                    self._index(entity, latin, loose=True)
         return entity
 
-    def _index(self, entity: Entity, form: str) -> None:
+    def _place_key(self, kind: str, core: str) -> str:
+        """Ключ места: известный объект, справочная начальная форма или начальная форма прилагательного."""
+        key = entity_key(core)
+        if key in self.entities:
+            return key
+        words = core.split()
+        adjective = len(words) == 1 and bool(ADJECTIVE_FORM.search(core)) and not core.isupper()
+        # Прилагательное-регион («Олекминском районе») словарь может прочесть как падеж города: сначала прилагательное.
+        if len(words) <= 2 and not (kind == "REGION" and adjective):
+            found = self._geo_lookup(core, pair=len(words) == 2)
+            if found:
+                return found[1]
+        if len(words) != 1:
+            return key
+        entity = self._inflected(fold(core))
+        if entity is not None and entity.kind == kind:
+            return entity.key
+        if adjective:
+            lemma = _lemma(core)
+            if lemma.endswith(("ий", "ый", "ой")):
+                return self._noun_of_adjective(lemma, kind) or lemma
+        lemmas = _lemmas(core)
+        return lemmas[0] if lemmas else key
+
+    def _noun_of_adjective(self, lemma: str, kind: str) -> str | None:
+        """«сибирский» → «сибирь», «кузбасский» → «кузбасс», «уральский» → «урал»: место того же вида, если оно известно."""
+        for tail in ("ский", "цкий", "ской", "ный", "ний"):
+            if lemma.endswith(tail):
+                base = lemma[:-len(tail)]
+                break
+        else:
+            return None
+        if len(base) < 3:
+            return None
+        soft = base.rstrip("ь")
+        table = geo.RU_REGIONS if kind == "REGION" else geo.RU_CITIES
+        for noun in (base, soft, base + "ь", soft + "ь", base + "ск", base + "с", base + "а", base + "о", base + "ы",
+                     base + "и", soft + "ье", soft + "ия", base + "ия", base + "ка"):
+            known = self.entities.get(noun)
+            if known is not None and known.kind == kind or noun in table:
+                return noun
+        return None
+
+    def _place_forms(self, entity: Entity, core: str) -> None:
+        """«Комсомольск-на-Амуре» в тексте зовут и просто «Комсомольск»: первая часть — написание того же места."""
+        head = _hyphen_head(core)
+        if head and fold(head) not in self.entities and fold(head) not in self._surface:
+            entity.add(head)
+            self._index(entity, head)
+            self._surface[fold(head)] = entity
+
+    def _index(self, entity: Entity, form: str, loose: bool = False) -> None:
         words = WORD.findall(form)
         if not words:
             return
-        # Слова формы разделяет что угодно, кроме букв и цифр: пробел, тире, «&».
-        pattern = re.compile(r"(?<![\w])" + r"[^\w]{1,4}".join(map(_word_pattern, words)) + r"(?![\w])", re.I)
+        # Слова формы разделяет что угодно, кроме букв и цифр: пробел, тире, «&». Короткое сокращение капсом («ДВФ»)
+        # ищем только капсом: строчное «двф» — уже не оно.
+        flags = 0 if form.isupper() and len(form) <= 5 else re.I
+        # Латинское написание русского названия встречается в именах файлов и шаблонов: «5_A4_TeDo basic_blue».
+        # Для него подчёркивание — такой же разделитель, как пробел или дефис.
+        edge_before, edge_after = (r"(?<![^\W_])", r"(?![^\W_])") if loose else (r"(?<![\w])", r"(?![\w])")
+        joiner = r"[^\w]{1,4}" if not loose else r"(?:[^\w]|_){1,4}"
+        pattern = re.compile(edge_before + joiner.join(map(_word_pattern, words)) + edge_after, flags)
         bucket = self._by_first.setdefault(fold(words[0]), [])
         bucket.append((entity, pattern, len(form)))
         bucket.sort(key=lambda item: -item[2])     # длинное название раньше короткого: «Аврора-3» до «Аврора»
@@ -347,6 +468,9 @@ class EntityRecognizer:
                         out.append((span[0], span[1], "ORG", core, reason))
             out.extend(self._quoted(text))
             out.extend(self._abbreviations(text))
+            out.extend(self._cue_names(text))
+            out.extend(self._trailing_noun_names(text))
+            out.extend(self._siblings(text, out))
         if self._on("geo"):
             out.extend(self._geo_intros(text))
         return out
@@ -377,12 +501,129 @@ class EntityRecognizer:
             kind = ""
             if prev in geo.PROJECT_CONTEXT or (prev in {"название", "названием", "именем"} and prev2 in geo.PROJECT_CONTEXT):
                 kind, reason = "PROJECT", "Название проекта или объекта"
+            elif prev in geo.UNIT_CONTEXT:
+                # «участок «Каменка»», «ОП «Северный»»: без юридической формы это площадка — место или объект.
+                found = self._geo_lookup(core) if len(core.split()) == 1 else None
+                if found or _toponym_like(WORD.findall(core)[0] if WORD.findall(core) else core):
+                    kind, reason = (found[0] if found else "CITY"), "Населённый пункт или площадка"
+                else:
+                    kind, reason = "PROJECT", "Название площадки или объекта"
             elif prev in geo.ORG_CONTEXT or prev2 in geo.ORG_CONTEXT and prev in {"под", "названием", "именем"}:
                 kind, reason = "ORG", "Название организации"
             elif _proper_looking(core):
                 kind, reason = "ORG", "Название в кавычках"
             if kind:
                 out.append((start, end, kind, core, reason))
+        return out
+
+    def _cue_names(self, text: str) -> list[tuple[int, int, str, str, str]]:
+        """«заявка на портал ELMA», «вендор Грантек»: несловарное слово после такого слова — название."""
+        out = []
+        for m in SERVICE_CUE.finditer(text):
+            name = m.group("n")
+            cue = fold(m.group("c"))
+            first = name.split()[0]
+            if not _brand_like(first) or fold(name) in self.keep:
+                continue
+            if not first.isascii() and re.match(r"[ \t]+[А-ЯЁ][а-яё]+", text[m.end("n"):m.end("n") + 24]):
+                continue          # «сервису Иванов Пётр»: за словом идёт ещё одно с заглавной, это человек, а не название
+            project = cue.startswith(("портал", "сервис", "платформ"))
+            if project and first.isupper() and not first.isascii():
+                continue          # «сервис ЭДО», «портал ГИС» — отраслевые сокращения, а не названия
+            if len(name.split()) > 1 and not _brand_like(name.split()[1]):
+                name = first
+            out.append((m.start("n"), m.start("n") + len(name), "PROJECT" if project else "ORG", name,
+                        "Название после слова «портал», «вендор», «подрядчик»"))
+        return out
+
+    def _trailing_noun_names(self, text: str) -> list[tuple[int, int, str, str, str]]:
+        """«Сумитек Групп», «Вектрон Холдинг»: слова перед родовым словом, хотя бы одно из них — не из словаря
+        и не география. «Первая Компания», «Уральский Завод» остаются как есть."""
+        out = []
+        for m in ORG_TRAILING_NOUN.finditer(text):
+            words = m.group("n").split()
+            head = words[:-1]
+            # Берём с конца: слова перед названием («Отчёт Сумитек Групп») в название не входят.
+            keep: list[str] = []
+            for word in reversed(head):
+                if _brand_like(word) or keep and word[:1].isupper() and not lexicon.is_common_word(word) \
+                        and not self._geo_lookup(word):
+                    keep.insert(0, word)
+                else:
+                    break
+            if not keep or not any(_brand_like(w) for w in keep):
+                continue
+            name = " ".join(keep + words[-1:])
+            start = m.start("n") + m.group("n").rindex(" ".join(keep))
+            if fold(name) in self.keep:
+                continue
+            out.append((start, start + len(name), "ORG", name, "Организация по родовому слову в названии"))
+        return out
+
+    def _siblings(self, text: str, spans) -> list[tuple[int, int, str, str, str]]:
+        """Соседи опознанной компании в перечне: «Балтика, Insignis и DFTC», «Heineken (Хейнекен)».
+
+        Если хотя бы один пункт перечня — опознанная компания, другие пункты того же ряда, похожие на название
+        (латиница, капс, несловарное слово), — тоже компании. Скобка сразу после компании — её другое написание.
+        """
+        from . import morphology as mo
+        if not SIBLING_SPLIT.search(text):
+            return []
+        lines = []
+        for line in re.finditer(r"[^\n]+", text):
+            line_start, line_end = line.span()
+            items, position = [], line_start
+            for sep in SIBLING_SPLIT.finditer(text, line_start, line_end):
+                items.append((position, sep.start(), text[sep.start():sep.end()].strip()))
+                position = sep.end()
+            items.append((position, line_end, ""))
+            capitalised = [(a, b) for a, b, _ in items if text[slice(*_item_core(text, a, b))][:1].isupper()]
+            if len(items) >= 2 and len(capitalised) >= 2:
+                lines.append((line_start, line_end, items))
+        if not lines:
+            return []
+        anchors = [(start, end, entity_key(core)) for start, end, kind, core, _ in spans if kind == "ORG"]
+        # Опорой служит компания, опознанная в этом документе явно; справочная («Балтика» из списка крупных брендов)
+        # в перечне рыночных игроков соседей не делает компаниями: там бывают и марки, и сорта, и обычные слова.
+        if self._explicit_orgs:
+            anchors += [(h.start, h.end, h.key) for h in self._known_hits(text)
+                        if h.category == "ORG" and h.key in self.entities and self.entities[h.key].explicit]
+        if not anchors:
+            return []
+        out = []
+        for line_start, line_end, items in lines:
+            if not any(line_start <= a and b <= line_end for a, b, _ in anchors):
+                continue
+            anchored = []
+            for a, b, _ in items:
+                core_a, core_b = _item_core(text, a, b)
+                owner = next((key for s, e, key in anchors if s <= core_a and core_b <= e and core_b > core_a), None)
+                anchored.append(owner)
+            if not any(anchored):
+                continue
+            for index, (a, b, sep) in enumerate(items):
+                if anchored[index]:
+                    continue
+                core_a, core_b = _item_core(text, a, b)
+                core = text[core_a:core_b]
+                words = core.split()
+                if not 1 <= len(words) <= 3 or not all(w[:1].isupper() or w in {"&", "and"} for w in words):
+                    continue
+                if fold(core) in self.keep or any(fold(w) in geo.COUNTRIES or fold(w) in geo.COMMON_SOFTWARE for w in words):
+                    continue
+                if len(words) > 1 and any(mo.is_given_name(w) for w in words):
+                    continue          # «Anna Fischer (Siemens)» — человек рядом с компанией, а не компания
+                previous = items[index - 1] if index else None
+                # «Heineken (Хейнекен)»: одна скобка сразу за компанией — другое написание той же компании. Здесь
+                # достаточно, чтобы слово не было обычным: словарь охотно читает транскрипцию бренда как имя.
+                alias = (previous is not None and anchored[index - 1] and previous[2] == "(" and sep == ")"
+                         and not text[previous[1]:a].strip("( ")
+                         and all(w.isascii() or not lexicon.is_common_word(w) and not _lemmas(w) for w in words))
+                if not alias and not any(_brand_like(w) for w in words):
+                    continue
+                if alias:
+                    self._pending_links[core] = anchored[index - 1]
+                out.append((core_a, core_b, "ORG", core, "Рядом в перечне с названием компании"))
         return out
 
     def _abbreviations(self, text: str) -> list[tuple[int, int, str, str, str]]:
@@ -416,8 +657,19 @@ class EntityRecognizer:
             # «2025 г. Выручка» — год, а не город; «см. п. Условия оплаты» — пункт договора, а не посёлок.
             if intro.startswith("г") and re.search(r"\d\s*$", text[:m.start()]):
                 continue
-            if intro in {"п.", "п"} and self._common_word(name.split()[0]):
-                continue
+            first = name.split()[0]
+            if intro in _AMBIGUOUS_INTROS and intro not in {"районе", "р-не"} and self._common_word(first) \
+                    and not (intro not in {"п.", "п"} and re.search(r"(?:к[аиеуо]|кой|[ыи]й|ая|ое)$", first)
+                             and not re.match(r"\s+[а-яё]{3,}", text[end:])):
+                continue          # «ст. Научный сотрудник» — должность, а не станица
+            if intro in {"районе", "р-не"} and not (
+                    _toponym_like(first) and (not lexicon.is_common_word(first) or _lemmas(first)
+                                              or re.search(r"(?:ово|ево|ино|ыно|[внрл]к[аиеуо])$", fold(first)))):
+                continue          # «в районе Нового года», «в районе Склада» — «около», а не название
+            if name.isupper() or name.split("-")[0].isupper():
+                # «ОП САГАН-НУР», «г. МОСКВА»: название капсом — не сокращение из делового языка.
+                if fold(name) in ACRONYM_STOP or len(name.replace("-", "")) < 4 and "-" not in name:
+                    continue
             words = name.split()
             # Второе слово берётся, только если это «Нижний Новгород»: прилагательное перед существительным.
             if len(words) == 2 and not re.search(r"(?:ий|ый|ая|яя|ое)$", words[0]) and \
@@ -427,7 +679,17 @@ class EntityRecognizer:
             if fold(name) in geo.COUNTRIES:
                 continue
             out.append((start, end, "CITY", name, "Населённый пункт"))
+        for m in LATIN_CITY_INTRO.finditer(text):
+            if fold(m.group("n")) not in LATIN_COUNTRIES and fold(m.group("n")) not in geo.COMMON_SOFTWARE:
+                out.append((m.start("n"), m.end("n"), "CITY", m.group("n"), "Населённый пункт"))
         for m in REGION_ADJ_HEAD.finditer(text):
+            out.append((m.start("n"), m.end("n"), "REGION", m.group("n"), "Регион"))
+            self._pending_heads.append((m.group("n"), text[m.end("n"):m.end()].strip()))
+        for m in REGION_LABEL.finditer(text):
+            adj = m.group("n")
+            if fold(adj) in geo.REGION_ADJECTIVES or _COMPOUND_PREFIX.match(fold(adj)) or self._adj_of_city(adj):
+                out.append((m.start("n"), m.end("n"), "REGION", adj, "Регион"))
+        for m in REGION_HEAD_ADJ.finditer(text):
             out.append((m.start("n"), m.end("n"), "REGION", m.group("n"), "Регион"))
         for m in REPUBLIC.finditer(text):
             name = m.group("n")
@@ -438,6 +700,7 @@ class EntityRecognizer:
             adj = m.group("n")
             if fold(adj) in geo.REGION_ADJECTIVES or self._adj_of_city(adj):
                 out.append((m.start("n"), m.end("n"), "REGION", adj, "Регион в названии подразделения"))
+                self._pending_heads.append((adj, text[m.end("n"):m.end()].strip()))
         return out
 
     @staticmethod
@@ -460,6 +723,15 @@ class EntityRecognizer:
             if stem.endswith(tail):
                 stem = stem[:-len(tail)]
                 break
+        lemma = fold(adj)
+        for tail, nominative in (("ского", "ский"), ("ской", "ский"), ("ском", "ский"), ("ская", "ский")):
+            if lemma.endswith(tail):
+                lemma = lemma[:-len(tail)] + nominative
+                break
+        # «Томский» → «Томск», «Братский» → «Братск»: короткая основа, но город из справочника.
+        if lemma.endswith("ский") and len(lemma) >= 7 and lemma[:-4] + "ск" in geo.RU_CITIES \
+                and lemma[:-4] + "ск" not in geo.AMBIGUOUS_CITIES:
+            return True
         stem = re.sub(r"(?:цк|нск|ск|овск|евск|инск)$", "", stem)
         if len(stem) < 5:
             return False
@@ -474,8 +746,14 @@ class EntityRecognizer:
     def learn(self, text: str) -> int:
         """Запомнить названия, введённые в тексте явно, — чтобы найти их упоминания везде."""
         self._pending_alias = {}
+        self._pending_heads = []
         spans = self.explicit_spans(text)
         added = self._learn_spans(spans)
+        if self._on("geo"):
+            self._learn_place_labels(text)
+            self._label_hits(text)
+            self._adjective_place_hits(text)
+        self._learn_words(text)
         if self._on("domains"):
             for m in EMAIL_DOMAIN.finditer(text):
                 self._register_domain(m.group("d"))
@@ -485,10 +763,17 @@ class EntityRecognizer:
         added = 0
         for start, end, kind, core, _reason in spans:
             before = len(self.entities)
-            entity = self.register(kind, core)
+            link = self._pending_links.get(core)
+            entity = self.register(kind, core, key=link if link in self.entities else None)
             added += len(self.entities) - before
             if entity is not None and kind == "ORG":
                 self._alias_from_tail(entity, core)
+        for adjective, head in self._pending_heads:
+            entity = self._surface.get(fold(adjective))
+            if entity is not None and entity.key in self.entities:
+                self._register_initialisms(entity, adjective, head)
+        self._pending_heads = []
+        self._pending_links = {}
         for abbr, full in self._pending_alias.items():
             full_entity = self.entities.get(entity_key(full))
             abbr_entity = self.entities.get(entity_key(abbr))
@@ -497,12 +782,150 @@ class EntityRecognizer:
                 self._merge(abbr_entity, full_entity)
         return added
 
+    def _register_initialisms(self, entity: Entity, adjective: str, head: str) -> None:
+        """«Дальневосточный филиал» пишут и «ДВФ», «Северо-Западный филиал» — «СЗФ»: это то же место.
+
+        Сокращение из трёх-четырёх букв с «Ф»/«ФО» однозначно и становится написанием места. Двухбуквенные «ДВ», «СФ»,
+        «КК» и усечения вроде «СИБ» совпадают с обиходными сокращениями («СФ» — счёт-фактура), поэтому они считаются
+        местом только там, где стоят как метка: отдельной ячейкой, пунктом списка, перед «:» или перед словом «филиал».
+        """
+        strong, labels = _initialisms(adjective, head)
+        for form in strong:
+            if fold(form) not in self._surface and fold(form) not in self.entities:
+                entity.add(form)
+                self._index(entity, form)
+                self._surface[fold(form)] = entity
+        for form in labels:
+            self._label_forms.setdefault(form, set()).add(entity.key)
+
+    def _learn_words(self, text: str) -> None:
+        """Сведения о словах документа для подсказок: что пишут строчными и какие названия повторяются."""
+        counts: dict[str, int] = {}
+        for line in text.split("\n"):
+            for m in WORD.finditer(line):
+                word = m.group(0)
+                if word[:1].islower():
+                    self._lower_words.add(fold(word))
+                    continue
+                head = line[:m.start()].rstrip()
+                if not head or head[-1] in ".!?…•·*" or not _brand_like(word):
+                    continue
+                counts[fold(word)] = counts.get(fold(word), 0) + 1
+        self._repeated |= {word for word, count in counts.items() if count >= 2}
+
+    def _repeated_hits(self, text: str) -> list[Hit]:
+        """Строгий режим: несловарное название, которое встречается в документе не раз, скрывается сразу."""
+        out = []
+        for m in WORD.finditer(text):
+            low = fold(m.group(0))
+            if low in self._repeated and low not in self.keep and low not in self._surface:
+                out.append(Hit(m.start(), m.end(), "ORG", low, "Название повторяется в документе", .8, P_REPEATED))
+        return out
+
+    def _learn_place_labels(self, text: str) -> None:
+        """Строки вида «Сервис Красноярск»: слово, после которого в документе стоят места. Если то же слово стоит и
+        перед коротким капсом («Сервис КК»), это код места того же ряда — он скрывается во всём документе."""
+        pairs = [line.split() for line in text.split("\n")]
+        pairs = [words for words in pairs if len(words) == 2 and words[0][:1].isupper() and not words[0].isupper()]
+        for first, second in pairs:
+            place = second.strip("()")
+            known = self._surface.get(fold(place))
+            if not place.isupper() and (self._geo_lookup(place) or known is not None and known.kind in {"CITY", "REGION"}):
+                self._place_prefixes[fold(first)] = self._place_prefixes.get(fold(first), 0) + 1
+        for first, second in pairs:
+            code = second.strip("()")
+            if (self._place_prefixes.get(fold(first), 0) >= 2 and re.fullmatch(r"[А-ЯЁ]{2,4}", code)
+                    and fold(code) not in ACRONYM_STOP and fold(code) not in self._surface):
+                self.register("REGION", code)
+
+    def _label_hits(self, text: str) -> list[Hit]:
+        """Сокращение места в роли метки: «ДВ», «СИБ -», «Сервис КК» (где в других строках «Сервис Красноярск»)."""
+        if not self._label_forms and not self._place_prefixes:
+            return []
+        out = []
+        for m in re.finditer(r"(?<![\w\-.])[А-ЯЁ]{2,4}(?![\w\-])", text):
+            form = m.group(0)
+            if fold(form) in self._surface or fold(form) in ACRONYM_STOP:
+                continue
+            keys = {k for k in self._label_forms.get(form, ()) if k in self.entities}
+            line_start = text.rfind("\n", 0, m.start()) + 1
+            line_end = text.find("\n", m.end())
+            line_end = len(text) if line_end < 0 else line_end
+            before = text[line_start:m.start()].strip()
+            after = text[m.end():line_end].strip()
+            if len(keys) == 1 and _label_context(before, after):
+                entity = self.entities[next(iter(keys))]
+                # Раз документ пишет место так в роли метки, это его написание и в остальном тексте документа.
+                entity.add(form)
+                self._index(entity, form)
+                self._surface[fold(form)] = entity
+            elif (not keys and len(before.split()) == 1 and not after and before[:1].isupper()
+                  and self._place_prefixes.get(fold(before), 0) >= 2):
+                # «Сервис КК» при «Сервис Красноярск», «Сервис Томск» в других строках: код места того же ряда.
+                entity = self.register("REGION", form)
+                if entity is None:
+                    continue
+            else:
+                continue
+            out.append(Hit(m.start(), m.end(), entity.kind, entity.key, "Сокращение названия места", .9, P_GEO_EXPLICIT))
+        return out
+
+    def _adjective_place_hits(self, text: str) -> list[Hit]:
+        """Прилагательное-место без слова «район» в роли метки: «20 сервис Олекминский», ячейка «Олекминский».
+
+        Обычное прилагательное («Технический», «Центральный») так не станет местом: основа должна совпасть с местом,
+        уже опознанным в документе, или с городом и регионом справочника.
+        """
+        out = []
+        for line in re.finditer(r"[^\n]+", text):
+            words = list(WORD.finditer(text, line.start(), line.end()))
+            for index, m in enumerate(words):
+                word = m.group(0)
+                if not word[:1].isupper() or word.isupper() or not ADJECTIVE_FORM.search(word):
+                    continue
+                if fold(word) in self._surface and self._surface[fold(word)].key in self.entities:
+                    continue          # уже известное написание: его найдёт общий поиск
+                after = text[m.end():line.end()].strip()
+                previous = fold(words[index - 1].group(0)) if index else ""
+                whole = not text[line.start():m.start()].strip() and not after
+                tail = previous in UNIT_LABEL_WORDS and (not after or after[0] in ",;)" or after[0].isdigit())
+                if not (whole or tail):
+                    continue
+                entity = self._place_of_adjective(word)
+                if entity is None:
+                    continue
+                out.append(Hit(m.start(), m.end(), entity.kind, entity.key, "Прилагательное от названия места",
+                               .9, P_GEO_EXPLICIT))
+        return out
+
+    def _place_of_adjective(self, word: str) -> Entity | None:
+        lemma = _lemma(word)
+        if not lemma.endswith(("ий", "ый", "ой")):
+            return None
+        entity = self.entities.get(lemma)
+        if entity is None or entity.kind not in {"CITY", "REGION"}:
+            entity = None
+            for kind, table in (("REGION", geo.RU_REGIONS), ("CITY", geo.RU_CITIES)):
+                noun = self._noun_of_adjective(lemma, kind)
+                if noun is None or noun in geo.AMBIGUOUS_CITIES:
+                    continue
+                known = self.entities.get(noun)
+                if known is not None and known.kind in {"CITY", "REGION"} or noun in table:
+                    return self.register("REGION", word)
+            return None
+        # Написание того же места: «Олекминский» при «в Олекминском районе».
+        entity.add(word)
+        self._index(entity, word)
+        self._surface[fold(word)] = entity
+        return entity
+
     def _alias_from_tail(self, entity: Entity, core: str) -> None:
         """«Сумитек интернейшнл» → отдельно «Сумитек» тоже относится к той же компании."""
         words = core.split()
-        if len(words) >= 2 and fold(words[-1]) in geo.ORG_NAME_TAILS:
+        if len(words) >= 2 and (fold(words[-1]) in geo.ORG_NAME_TAILS or fold(words[-1]).startswith(ORG_NOUN_PREFIXES)
+                                and any(_brand_like(w) for w in words[:-1])):
             head = " ".join(words[:-1])
-            if head and fold(head) not in geo.COMMON_SOFTWARE and not _ordinary(head):
+            if head and fold(head) not in geo.COMMON_SOFTWARE and (not _ordinary(head) or all(map(_brand_like, words[:-1]))):
                 if head not in entity.forms:
                     entity.add(head)
                     self._index(entity, head)
@@ -512,6 +935,9 @@ class EntityRecognizer:
             target.add(form)
             self._index(target, form)
         self.entities.pop(source.key, None)
+        for surface, owner in list(self._surface.items()):
+            if owner is source:
+                self._surface[surface] = target
         for bucket in self._by_first.values():
             bucket[:] = [item for item in bucket if item[0] is not source]
         for bucket in self._by_stem.values():
@@ -536,6 +962,7 @@ class EntityRecognizer:
         if not text.strip():
             return []
         self._pending_alias = {}
+        self._pending_heads = []
         spans = self.explicit_spans(text)
         self._learn_spans(spans)
         if self._on("domains") and "@" in text:
@@ -543,7 +970,9 @@ class EntityRecognizer:
                 self._register_domain(m.group("d"))
         hits: list[Hit] = []
         for start, end, kind, core, reason in spans:
-            entity = self.entities.get(entity_key(core))
+            entity = self._surface.get(fold(core.strip(" \t«»“”„\"'"))) or self.entities.get(entity_key(core))
+            if entity is not None and entity.key not in self.entities:
+                entity = self.entities.get(entity_key(core))
             if entity is None:
                 # Название не принято к учёту (например, стоит в списке «не скрывать»).
                 continue
@@ -552,6 +981,12 @@ class EntityRecognizer:
         hits.extend(self._known_hits(text))
         if self._on("geo"):
             hits.extend(self._gazetteer_hits(text))
+            hits.extend(self._label_hits(text))
+            hits.extend(self._adjective_place_hits(text))
+        if self._repeated and self._on("organizations") and getattr(self.settings, "strict", False):
+            hits.extend(self._repeated_hits(text))
+        if getattr(self.settings, "countries", False):
+            hits.extend(country_hits(text))
         if self._on("domains"):
             hits.extend(self._domain_hits(text))
         if self._on("filenames"):
@@ -575,54 +1010,95 @@ class EntityRecognizer:
                 name = m.group("n")
                 first = name.split()[0]
                 if fold(first) in self.keep or fold(name) in self.keep or fold(first) in self.STOP_CANDIDATES \
-                        or fold(first) in geo.COUNTRIES or first.isdigit() or fold(first) in geo.LEGAL_FORMS:
+                        or fold(first) in geo.COUNTRIES or first.isdigit() or first.upper() in geo.LEGAL_FORMS:
                     continue
                 if any(fold(h) in self.entities for h in (name, first)):
                     continue
                 out.append(Hit(m.start("n"), m.end("n"), "POSSIBLE_ENTITY", entity_key(name), reason, .5, 410, "REVIEW"))
+        # Несколько латинских слов подряд («Pernod Ricard Rouss») — одно название, а не три подсказки.
+        runs = [m.span() for m in LATIN_RUN.finditer(text)] if cyrillic_unit else []
+        for a, b in runs:
+            words = text[a:b].split()
+            if all(fold(w) in self.STOP_CANDIDATES or fold(w) in LATIN_COUNTRIES or fold(w) in self.entities
+                   for w in words) or fold(text[a:b]) in self.keep or fold(text[a:b]) in self.entities:
+                continue
+            out.append(Hit(a, b, "POSSIBLE_ENTITY", entity_key(text[a:b]), "Латинское название: возможно, компания или бренд",
+                           .45, 400, "REVIEW"))
+        whole_unit = text.strip()
         for m in WORD.finditer(text):
             word = m.group(0)
             if len(word) < 3 or not word[0].isupper() or any(ch.isdigit() for ch in word):
                 continue
+            if any(a <= m.start() < b for a, b in runs):
+                continue
             head = text[:m.start()].rstrip()
-            if not head or head[-1] in ".!?…:;\n•·*" or head[-1] in "–—-" and len(head) < 3:
+            # Ячейка из одного слова — не начало предложения, а метка или название: её тоже надо показать.
+            if word != whole_unit and (not head or head[-1] in ".!?…\n•·*" or head[-1] in "–—-" and len(head) < 3):
                 continue
             low = fold(word)
             if low in self.STOP_CANDIDATES or low in self.keep or low in self.entities or low in geo.COUNTRIES:
                 continue
+            parts = re.split(r"[.\-'’]", word)
+            if len(parts) > 1 and all(lexicon.is_common_word(p) or p.isascii() and p.islower() for p in parts):
+                continue          # «Инженер-механик», «Подразделение.Филиал», «Отчёт.pptx» — составные обычные слова
             latin = word.isascii()
             if latin and not cyrillic_unit:
                 continue
-            if not latin and (mo.is_stop_word(word) or mo.is_given_name(word)):
+            # Капсом («КОМАЦУ») слово — не имя, даже если словарь знает такое имя.
+            if not latin and (mo.is_stop_word(word) or not word.isupper() and mo.is_given_name(word)):
                 continue
             if not latin and any(lemma in geo.COUNTRIES or lemma in geo.RU_CITIES or lemma in geo.WORLD_CITIES
                                  for lemma in _lemmas(word)):
                 continue
             if low in LATIN_COUNTRIES:
                 continue
+            confidence = STRONG_SUGGESTION if low in self._repeated else .45
             if word.isupper():
                 if not 3 <= len(word) <= 7 or low in ACRONYM_STOP:
                     continue
                 if not latin:
                     ordinary = lexicon.shape(word.capitalize())
-                    if ordinary.lexical and ordinary.known and not ordinary.surname:
+                    if ordinary.lexical and ordinary.known and not ordinary.surname and not ordinary.given:
                         continue
                 reason = "Аббревиатура: возможно, название компании"
             else:
                 if latin:
                     if low in {"the", "and", "for"} or word[1:].isupper() is False and not re.search(r"[a-z]", word[1:]):
                         continue
+                    # Одно латинское слово посреди русского текста — почти всегда название или бренд.
+                    confidence = STRONG_SUGGESTION
                 else:
+                    if _verb_like(word):
+                        continue          # «Инвентаризируем» после разрыва таблицы — глагол, а не название
                     shape = lexicon.shape(word)
-                    if shape.lexical and shape.known and not shape.surname:
-                        continue
-                    if lexicon.is_common_word(word):
+                    if shape.lexical and shape.known and not shape.surname or lexicon.is_common_word(word):
+                        if not self._capitalised_lexeme(text, m, word, whole_unit):
+                            continue
+                        reason = "Обычное слово с заглавной буквы посреди предложения: возможно, название"
+                        out.append(Hit(m.start(), m.end(), "POSSIBLE_ENTITY", entity_key(word), reason, .45, 400, "REVIEW"))
                         continue
                     if shape.given and not shape.surname:
                         continue
                 reason = "Похоже на название или фамилию"
-            out.append(Hit(m.start(), m.end(), "POSSIBLE_ENTITY", entity_key(word), reason, .45, 400, "REVIEW"))
+            out.append(Hit(m.start(), m.end(), "POSSIBLE_ENTITY", entity_key(word), reason, confidence, 400, "REVIEW"))
         return out
+
+    def _capitalised_lexeme(self, text: str, m: "re.Match[str]", word: str, whole_unit: str) -> bool:
+        """Словарное слово с заглавной посреди фразы, которое в документе ни разу не написано строчными («нашими ИТ
+        или Топлог»): так пишут название. Заголовки из слов с заглавной («Отчёт По Продажам») не в счёт."""
+        if word == whole_unit or len(self._lower_words) < 50 or fold(word) in self._lower_words or _lemmas(word):
+            return False
+        # Название так и пишут — существительным в начальной форме; «Различия», «Заказчиков», «Коммерческий» — нет.
+        morph = lexicon.analyzer()
+        tag = morph.parse(word)[0].tag if morph is not None else None
+        if tag is None or tag.POS != "NOUN" or not {"sing", "nomn"} <= set(tag.grammemes):
+            return False
+        if lexicon.shape(word).lemma and fold(lexicon.shape(word).lemma) in self._lower_words:
+            return False
+        before = WORD.findall(text[max(0, m.start() - 40):m.start()])
+        after = WORD.findall(text[m.end():m.end() + 40])
+        title = any(w[:1].isupper() and not w.isupper() for w in before[-3:] + after[:1])
+        return bool(before) and before[-1][:1].islower() and not title
 
     def _known_hits(self, text: str) -> list[Hit]:
         if not self.entities:
@@ -665,7 +1141,25 @@ class EntityRecognizer:
                 if entity is not None:
                     out.append(Hit(m.start(), m.end(), entity.kind, entity.key, "Другая форма известного названия",
                                    .92, self._known_priority(entity)))
+                    continue
+            if token[:1].isupper() and token[-1:].isdigit():
+                entity = self._numbered_place(token)
+                if entity is not None:
+                    # «Еруда2» — метка площадки: место с номером. Заменяется слово целиком, как отдельное написание
+                    # того же места, чтобы номер не слипся с меткой («City5» + «2») и возврат был точным.
+                    out.append(Hit(m.start(), m.end(), entity.kind, entity.key, "Название места с номером",
+                                   .9, self._known_priority(entity)))
         return out
+
+    def _numbered_place(self, token: str) -> Entity | None:
+        parts = re.fullmatch(r"([^\W\d_]{4,})(\d{1,3})", token)
+        if not parts:
+            return None
+        alpha = fold(parts.group(1))
+        entity = self._surface.get(alpha) or self._inflected(alpha)
+        if entity is not None and entity.kind in {"CITY", "REGION"} and entity.key in self.entities:
+            return entity
+        return None
 
     @staticmethod
     def _starts(token: str, offset: int):
@@ -701,6 +1195,8 @@ class EntityRecognizer:
     def _known_priority(entity: Entity) -> int:
         if entity.kind == "TERM":
             return P_TERM
+        if entity.kind == "DOMAIN":
+            return P_DOMAIN
         return P_GEO_KNOWN if entity.kind in {"CITY", "REGION"} else P_KNOWN
 
     @staticmethod
@@ -762,6 +1258,8 @@ class EntityRecognizer:
                 return kind, low
         if phrase.isascii() and low in geo.LATIN_CITIES:
             return "CITY", low
+        if low in CITY_HEADS and not pair:
+            return "CITY", CITY_HEADS[low]
         if not phrase.isascii():
             candidates = []
             if pair:
@@ -774,6 +1272,8 @@ class EntityRecognizer:
                 for table, kind in ((geo.RU_CITIES, "CITY"), (geo.WORLD_CITIES, "CITY"), (geo.RU_REGIONS, "REGION")):
                     if lemma in table:
                         return kind, lemma
+                if lemma in CITY_HEADS and not pair:
+                    return "CITY", CITY_HEADS[lemma]
         return None
 
     def _domain_hits(self, text: str) -> list[Hit]:
@@ -850,6 +1350,111 @@ class EntityRecognizer:
         return words[index].start()
 
 
+# -- страны (настройка «Скрывать страны») ---------------------------------------
+
+ADJECTIVE_ENDING = re.compile(r"(?:ий|ый|ой|ая|яя|ое|ее|ие|ые|ого|его|ому|ему|ым|им|ом|ем|ую|юю|ых|их|ыми|ими|ей)$", re.I)
+# «Ю. Корея», «С. Корея»: сокращённое прилагательное перед названием.
+COUNTRY_INITIAL = re.compile(r"(?<![\w.])([ЮС])\.\s?(Коре[яиеюй]й?)(?![\w-])")
+_INITIAL_COUNTRY = {"Ю": "южная корея", "С": "северная корея"}
+# Латинские слова, которые чаще значат не страну: имя Jordan, штат Georgia, turkey (индейка).
+_LATIN_AMBIGUOUS = {"jordan", "georgia", "turkey"}
+
+
+@lru_cache(maxsize=32768)
+def _normal_forms(word: str) -> frozenset[str]:
+    morph = lexicon.analyzer()
+    if morph is None or word.isascii():
+        return frozenset({fold(word)})
+    try:
+        return frozenset({fold(word)} | {fold(p.normal_form) for p in morph.parse(word)[:5]})
+    except Exception:
+        return frozenset({fold(word)})
+
+
+@lru_cache(maxsize=1)
+def _country_index() -> tuple[dict, dict, dict, int]:
+    """Слово → страна (кириллица через начальную форму, латиница и сокращения дословно) и многословные названия."""
+    single_cyr: dict[str, str] = {}
+    exact: dict[str, str] = {}
+    phrases: dict[tuple, str] = {}
+    longest = 1
+    for form, key in geo.COUNTRY_NAMES.items():
+        words = form.split()
+        if len(words) > 1:
+            longest = max(longest, len(words))
+            if form.isascii():
+                phrases[tuple(fold(w) for w in words)] = key
+            else:
+                phrases[tuple(_lemma(w) for w in words)] = key
+        elif form.isascii() or form.isupper():
+            if fold(form) not in _LATIN_AMBIGUOUS:
+                exact[form if form.isupper() else fold(form)] = key
+        else:
+            single_cyr[fold(form)] = key
+            single_cyr[_lemma(form)] = key
+    return single_cyr, exact, phrases, longest
+
+
+def _country_word(word: str) -> str | None:
+    single_cyr, exact, _, _ = _country_index()
+    if word.isupper() and word in exact:
+        return exact[word]
+    if word.isascii():
+        return exact.get(fold(word)) if word[:1].isupper() else None
+    forms = _normal_forms(word if not word.isupper() else word.capitalize())
+    if word[:1].isupper():
+        found = next((single_cyr[f] for f in forms if f in single_cyr), None)
+        if found:
+            return found
+    if ADJECTIVE_ENDING.search(word):
+        return next((geo.COUNTRY_ADJECTIVES[f] for f in forms if f in geo.COUNTRY_ADJECTIVES), None)
+    return None
+
+
+def _country_phrase(words: list[str]) -> str | None:
+    _, _, phrases, _ = _country_index()
+    if not all(w[:1].isupper() for w in words):
+        return None
+    if all(w.isascii() for w in words):
+        return phrases.get(tuple(fold(w) for w in words))
+    options = [_normal_forms(w) for w in words]
+    for lemmas, key in phrases.items():
+        if len(lemmas) == len(words) and all(l in o for l, o in zip(lemmas, options)):
+            return key
+    return None
+
+
+def country_hits(text: str) -> list[Hit]:
+    """Страна и её формы: «Армении», «армянский», «КНР», «Ю. Корея», «China». Ключ — страна, поэтому у всех форм
+    одна метка. Часть слова не заменяется: «Китайгородский» — не Китай."""
+    out: list[Hit] = []
+    taken: list[tuple[int, int]] = []
+    for m in COUNTRY_INITIAL.finditer(text):
+        out.append(Hit(m.start(), m.end(), "COUNTRY", _INITIAL_COUNTRY[m.group(1)], "Страна", .95, P_COUNTRY))
+        taken.append(m.span())
+    tokens = [t for t in WORD.finditer(text) if not any(a <= t.start() < b for a, b in taken)]
+    longest = _country_index()[3]
+    i = 0
+    while i < len(tokens):
+        step = 0
+        for n in range(min(longest, len(tokens) - i), 1, -1):
+            seg = tokens[i:i + n]
+            if any(text[a.end():b.start()].strip() for a, b in zip(seg, seg[1:])):
+                continue
+            key = _country_phrase([t.group(0) for t in seg])
+            if key:
+                out.append(Hit(seg[0].start(), seg[-1].end(), "COUNTRY", key, "Страна", .95, P_COUNTRY))
+                step = n
+                break
+        if not step:
+            key = _country_word(tokens[i].group(0))
+            if key:
+                out.append(Hit(tokens[i].start(), tokens[i].end(), "COUNTRY", key, "Страна", .95, P_COUNTRY))
+            step = 1
+        i += step
+    return out
+
+
 def _word_pattern(word: str) -> str:
     """Слово как регулярное выражение, безразличное к «е» и «ё»."""
     out = []
@@ -863,6 +1468,182 @@ def _word_pattern(word: str) -> str:
     return "".join(out)
 
 
+_TRANSLIT = {"а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh", "з": "z", "и": "i",
+             "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+             "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch", "ъ": "", "ы": "y", "ь": "", "э": "e",
+             "ю": "yu", "я": "ya"}
+# Второй распространённый вариант: «Хабаровск» — Habarovsk, «Цемент» — Cement, «Юнона» — Iunona.
+_TRANSLIT_ALT = {**_TRANSLIT, "х": "h", "ц": "c", "й": "i", "ю": "iu", "я": "ia", "щ": "sch"}
+
+
+def transliterations(name: str) -> list[str]:
+    """Латинские написания русского названия (по двум распространённым схемам), с сохранением заглавных:
+    «ТеДо» → TeDo, «Аврора» → Avrora. Короткие и чисто латинские названия не трогаем."""
+    letters = [ch for ch in name if ch.isalpha()]
+    if len(letters) < 4 or not any("\u0400" <= ch <= "\u04ff" for ch in letters):
+        return []
+    out = []
+    for table in (_TRANSLIT, _TRANSLIT_ALT):
+        parts = []
+        for word in re.split(r"(\W+)", name):
+            upper = len(word) > 1 and word.isupper()
+            chunk = []
+            for ch in word:
+                latin = table.get(ch.lower(), ch)
+                if ch.isupper() and latin:
+                    latin = latin.upper() if upper else latin[0].upper() + latin[1:]
+                chunk.append(latin)
+            parts.append("".join(chunk))
+        variant = "".join(parts)
+        if variant.isascii() and variant not in out:
+            out.append(variant)
+    return out
+
+
+@lru_cache(maxsize=32768)
+def _verb_like(word: str) -> bool:
+    """Глагол или причастие («Инвентаризируем», «Проверяйте»): с заглавной оно только в начале фразы."""
+    morph = lexicon.analyzer()
+    if morph is None or word.isascii():
+        return False
+    try:
+        return morph.parse(word)[0].tag.POS in {"VERB", "INFN", "GRND", "PRTF", "PRTS"}
+    except Exception:
+        return False
+
+
+@lru_cache(maxsize=32768)
+def _brand_like(word: str) -> bool:
+    """Слово похоже на название, а не на обычное слово или имя: латиница с заглавной, капс из 2–6 букв,
+    русское слово, которого нет в словаре. Страны, города, программы и деловые сокращения — нет."""
+    low = fold(word)
+    if len(word) < 2 or not word[:1].isupper() or any(ch.isdigit() for ch in word):
+        return False
+    if (low in geo.COMMON_SOFTWARE or low in geo.COUNTRIES or low in LATIN_COUNTRIES or low in ACRONYM_STOP
+            or low in geo.QUOTED_NON_NAMES or low in geo.RU_CITIES or low in geo.WORLD_CITIES or low in geo.RU_REGIONS
+            or low in geo.LEGAL_FORMS or low in {"the", "and", "for", "of", "ex"}):
+        return False
+    if word.isascii():
+        return len(word) >= 2 and (len(word) >= 3 or word.isupper())
+    if word.isupper():
+        return 2 <= len(word) <= 6
+    if not lexicon.available():
+        return False
+    from . import morphology as mo
+    # Признак «словарь знает слово» у pymorphy ненадёжен: он угадывает разбор по окончанию («Вектрон» — «известное»
+    # существительное). Надёжнее проверки на обычное слово в любой форме, имя, фамилию и географию.
+    shape = lexicon.shape(word)
+    if shape.surname or shape.patronymic or mo.is_given_name(word) or mo.is_stop_word(word):
+        return False
+    if lexicon.is_common_word(word) or _lemmas(word):
+        return False
+    return not _verb_like(word)
+
+
+_COMPOUND_PREFIX = re.compile(r"^(дальне|ближне|северо|юго|южно|западно|восточно|верхне|нижне|средне)-?(.{4,})$")
+
+
+def _initialisms(adjective: str, head: str) -> tuple[set[str], set[str]]:
+    """Сокращения места по прилагательному и слову после него: (однозначные, только в роли метки)."""
+    lemma = _lemma(adjective) if not adjective.isascii() else fold(adjective)
+    if "-" in lemma:
+        parts = [p for p in lemma.split("-") if p]
+    else:
+        compound = _COMPOUND_PREFIX.match(lemma)
+        parts = list(compound.groups()) if compound else [lemma]
+    if not parts or not all(parts):
+        return set(), set()
+    letters = "".join(p[0] for p in parts).upper()
+    head = fold(head).split()[-1] if head.split() else ""
+    federal = "федеральн" in fold(head) or head == "фо"
+    strong: set[str] = set()
+    labels: set[str] = set()
+    if head.startswith("филиал"):
+        if len(parts) > 1:
+            strong.add(letters + "Ф")
+            labels.update({letters, letters[0] + "Ф"})
+        else:
+            labels.update({letters + "Ф", lemma[:3].upper()})
+    elif head.startswith("округ") or federal:
+        strong.add(letters[0] + "ФО")
+        if len(parts) > 1:
+            strong.add(letters + "ФО")
+    elif head.startswith("кра"):
+        labels.add(letters[0] + "К")
+    stop = {f for f in strong | labels if fold(f) in ACRONYM_STOP}
+    return strong - stop, labels - stop
+
+
+def _label_context(before: str, after: str) -> bool:
+    """Слово стоит как метка: ячейка целиком, начало строки перед «:»/«-», пункт списка, перед «филиал», после «ОП»."""
+    if not before and not after:
+        return True
+    if (not before or before[-1] in ".;,:") and after[:1] in {":", "-", "–", "—"}:
+        return True
+    if (not before or before[-1] in ",;/|(") and (not after or after[0] in ",;/|)"):
+        return True
+    following = WORD.findall(after[:24])
+    if following and fold(following[0]) in geo.BRANCH_HEADS:
+        return True
+    return bool(before) and fold(before.split()[-1]) == "оп"
+
+
+def _toponym_like(word: str) -> bool:
+    """Слово похоже на название места: есть в справочнике, словарь помечает его географическим, типичное окончание
+    названий сёл («Малиновка», «Тальжино») или слова нет в словаре вовсе."""
+    low = fold(word)
+    if low in geo.RU_CITIES or low in geo.WORLD_CITIES or low in geo.RU_REGIONS or _lemmas(word):
+        return True
+    if re.search(r"(?:ово|ево|ёво|ино|ыно|ское|цкое|[внрл]к[аиеуо]|ск)$", low):
+        return True
+    return lexicon.available() and not lexicon.shape(word).known
+
+
+def _item_core(text: str, start: int, end: int) -> tuple[int, int]:
+    """Границы пункта перечня без кавычек, юридической формы и приставки «ex-»."""
+    while start < end and text[start] in " \t«»“”„\"'":
+        start += 1
+    while end > start and text[end - 1] in " \t«»“”„\"'.":
+        end -= 1
+    prefix = _ITEM_PREFIX.match(text[start:end])
+    if prefix:
+        start += prefix.end()
+        while start < end and text[start] in " «“„\"'":
+            start += 1
+    return start, end
+
+
+def _hyphen_head(name: str) -> str | None:
+    """Первая часть составного названия, которой место зовут коротко: «Комсомольск-на-Амуре» → «Комсомольск»,
+    «Каменск-Уральский» → «Каменск». «Орехово-Зуево» и «Улан-Удэ» так не сокращают."""
+    parts = name.split("-")
+    if len(parts) < 2 or len(parts[0]) < 5 or not parts[0][:1].isupper() or parts[0].isupper():
+        return None
+    if not (parts[1].islower() or ADJECTIVE_CORE.match(parts[-1]) and parts[-1][:1].isupper()):
+        return None
+    head = fold(parts[0])
+    if head in geo.RU_CITIES or head in geo.WORLD_CITIES or head in geo.AMBIGUOUS_CITIES or head in geo.COUNTRIES:
+        return None
+    if head.endswith("о"):
+        return None           # «Северо-Енисейский», «Лосино-Петровский»: первая часть — не название
+    if lexicon.available():
+        shape = lexicon.shape(parts[0])
+        if shape.surname or shape.given or shape.lexical and shape.known and not _lemmas(parts[0]):
+            return None       # «Камень-на-Оби», «Юрьев-Польский»: первая часть — обычное слово или фамилия
+    return parts[0]
+
+
+def _city_heads() -> dict[str, str]:
+    """Короткие имена справочных городов; если первая часть общая у двух городов («Каменск»), её не берём."""
+    heads: dict[str, list[str]] = {}
+    for city in geo.RU_CITIES:
+        head = _hyphen_head("-".join(p if p in {"на", "в", "под", "над", "де"} else p[:1].upper() + p[1:]
+                                     for p in city.split("-")))
+        if head:
+            heads.setdefault(fold(head), []).append(city)
+    return {head: cities[0] for head, cities in heads.items() if len(cities) == 1}
+
+
 def _stem_of(low: str) -> str:
     return low[:-1] if low and low[-1] in "аяоеиыьйю" and len(low) >= 5 else low
 
@@ -872,3 +1653,6 @@ def _pair_lemmas(phrase: str) -> tuple[tuple[str, ...], ...]:
     """Двусловные названия: прилагательное («Нижний») не помечено как географическое, существительное — да."""
     first, second = phrase.split(" ", 1)
     return tuple((a, b) for a in {_lemma(first), fold(first)} for b in (_lemmas(second) or (fold(second),)))
+
+
+CITY_HEADS = _city_heads()

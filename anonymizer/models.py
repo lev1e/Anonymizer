@@ -88,6 +88,8 @@ class Settings:
     filenames: bool = True
     numbers: bool = False
     strict: bool = False
+    countries: bool = False         # скрывать названия стран и прилагательные от них
+    neutral_names: bool = True      # имя результата — «Файл1 (обезличено)», исходное имя хранится для возврата
     suggest: bool = False
     hide_terms: list[str] = field(default_factory=list)
     keep_terms: list[str] = field(default_factory=list)

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import os
+import posixpath
 import re
 import tempfile
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import fitz
 from lxml import etree
 
+from . import lexicon
 from . import numbers as numeric
 from .models import Decision, FileResult, FileStatus, Finding, Settings
 from .normalize import fold
@@ -32,8 +35,9 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".
 
 # Свойства документа. В core.xml имена строчные, в app.xml — с заглавной (`Company`, `Manager`), поэтому перечислены оба вида.
 # Название (`title`) и категория обычно содержат имя клиента или проекта: «Отчёт для ООО «Вектор-Строй»».
+# `Template` — имя шаблона оформления в app.xml: у корпоративного шаблона в нём название клиента («Клиент_шаблон.potx»).
 METADATA_TAGS = {"creator", "lastModifiedBy", "company", "manager", "comments", "description", "subject", "keywords",
-                 "title", "category", "Company", "Manager", "contentStatus", "HyperlinkBase"}
+                 "title", "category", "Company", "Manager", "contentStatus", "HyperlinkBase", "Template"}
 TEXT_TAGS = {
     "t", "text", "delText", "f", "definedName", "oddHeader", "evenHeader", "firstHeader",
     "oddFooter", "evenFooter", "firstFooter", "author", "instrText", "lpwstr", "bstr", "lpstr",
@@ -68,7 +72,17 @@ NAMED_ELEMENT_ATTRS = {
     ("hyperlink", "tooltip"), ("hyperlink", "display"), ("dataValidation", "prompt"), ("dataValidation", "promptTitle"),
     ("dataValidation", "error"), ("dataValidation", "errorTitle"), ("cfRule", "text"),
     ("property", "name"),
+    # Имена темы, палитры, шрифтовой схемы и эффектов: автор корпоративного шаблона пишет в них название клиента
+    # («Клиент ppt color palette»). В документе их не видно, но в файле они лежат открытым текстом.
+    # `themeFamily` (расширение Office 2013+) хранит ещё и имя файла шаблона: «Клиент_template_blue.potx».
+    ("theme", "name"), ("clrScheme", "name"), ("fontScheme", "name"), ("fmtScheme", "name"), ("themeFamily", "name"),
 }
+TEMPLATE_NAME_ATTRS = {("theme", "name"), ("clrScheme", "name"), ("fontScheme", "name"), ("fmtScheme", "name"),
+                       ("themeFamily", "name")}
+# Встроенные имена Office: в них нет ничего о владельце, и заменять их незачем.
+BUILTIN_TEMPLATE_NAME = re.compile(
+    r"(?i)^\s*(?:(?:тема\s+)?office(?:\s+\d{4}(?:\s*[-–]\s*\d{4})?)?(?:\s+(?:theme|тема))?|normal(?:\.dot[mx]?)?|blank(?:\.potx)?|"
+    r"(?:custom|другая|специальная|пользовательская|настраиваемая)(?:\s+\d+)?)\s*$")
 # Имена одних и тех же элементов в разных форматах значат разное: `tag` в Word — метка элемента управления, а в PowerPoint —
 # служебные данные надстройки (think-cell хранит там целый XML). Поэтому такие атрибуты берутся только в своей части файла.
 PART_NAMED_ATTRS = {
@@ -87,6 +101,9 @@ LOCAL_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|file:|\\\\|/Users/|/home/)")
 # Значения длиннее этого — машинные данные (base64, пути, стили), а не текст документа.
 MAX_ATTRIBUTE_LENGTH = 10_000
 
+# Сколько чисел-сумм в книге (не дат, не лет, не номеров до 12) уже стоит подсказки «включите замену чисел».
+MANY_AMOUNTS = 20
+
 
 EMBEDDED_SUFFIXES = (".xlsx", ".docx", ".pptx")
 
@@ -95,6 +112,223 @@ def is_embedded_package(name: str) -> bool:
     """Книга, документ или презентация внутри файла: данные диаграммы, вставленный объект."""
     lowered = name.lower()
     return "/embeddings/" in lowered and lowered.endswith(EMBEDDED_SUFFIXES)
+
+
+# Вложения, которые программа не разбирает: их содержимое уходит наружу как есть.
+EMBEDDED_LABELS = {".xlsb": "встроенный .xlsb", ".xls": "встроенный .xls", ".xlsm": "встроенный .xlsm",
+                   ".doc": "встроенный .doc", ".docm": "встроенный .docm", ".ppt": "встроенный .ppt",
+                   ".pptm": "встроенный .pptm", ".pdf": "встроенный PDF", ".bin": "объект OLE (.bin)"}
+
+
+def unprocessed_embeddings(names, depth: int = 0) -> dict[str, int]:
+    """Сколько вложений каждого вида останется необезличенным: двоичные книги, объекты OLE, PDF."""
+    counts: dict[str, int] = {}
+    for name in names:
+        lowered = name.lower()
+        if "/embeddings/" not in lowered or lowered.endswith((".xml", ".rels")) or "/_rels/" in lowered:
+            continue
+        if is_embedded_package(name) and depth < 2:
+            continue
+        label = EMBEDDED_LABELS.get(Path(lowered).suffix, f"вложение {Path(lowered).suffix or 'без расширения'}")
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def embedded_warning(counts: dict[str, int]) -> str:
+    listing = ", ".join(f"{label} ({n})" if n > 1 else label for label, n in counts.items())
+    return (f"Вложенные объекты не обезличены: {listing}. Их содержимое осталось как есть и может содержать исходные "
+            "данные: удалите эти объекты из файла или проверьте их вручную")
+
+
+def removal_notice(removal: "EmbeddedRemoval") -> str:
+    listing = ", ".join(f"{label} ({n})" if n > 1 else label for label, n in removal.labels.items())
+    what = []
+    if removal.charts:
+        what.append(f"диаграммы ({removal.charts}) сохранили свой вид, но изменить или обновить их данные больше нельзя")
+    if removal.ole:
+        what.append(f"вставленные объекты ({removal.ole}) заменены их картинками и больше не редактируются")
+    tail = "; ".join(what)
+    return (f"Удалены вложения, которые программа не умеет обезличить: {listing}. В них были исходные данные. "
+            + (tail[:1].upper() + tail[1:] + "." if tail else ""))
+
+
+THUMBNAIL_REL = "/metadata/thumbnail"
+
+
+def drop_thumbnails(parsed: dict, names: list[str]) -> set[str]:
+    """Эскиз первой страницы (docProps/thumbnail.jpeg) — картинка титульного слайда или листа.
+
+    Текст на картинке заменить нельзя, а название клиента на ней читается. Эскиз удаляется вместе со ссылкой
+    на него и записью о типе: Office создаст новый при следующем сохранении. Возвращает имена удалённых частей.
+    """
+    dropped = {n for n in names if n.lower().startswith("docprops/thumbnail")}
+    rels = parsed.get("_rels/.rels")
+    if rels is not None:
+        for rel in list(rels):
+            target = (rel.get("Target") or "").lstrip("/").lower()
+            if (rel.get("Type") or "").endswith(THUMBNAIL_REL):
+                dropped.update(n for n in names if n.lower() == target)
+            if (rel.get("Type") or "").endswith(THUMBNAIL_REL) or target in {d.lower() for d in dropped}:
+                rels.remove(rel)
+    types = parsed.get("[Content_Types].xml")
+    if types is not None and dropped:
+        parts = {"/" + n.lower() for n in dropped}
+        for node in list(types):
+            if (node.get("PartName") or "").lower() in parts:
+                types.remove(node)
+    return dropped
+
+
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+R_ID = f"{{{R_NS}}}id"
+
+
+@dataclass
+class EmbeddedRemoval:
+    """Что убрано из вложений: удалённые части, число диаграмм без книги данных и объектов OLE, ставших картинкой."""
+    parts: set[str] = field(default_factory=set)
+    charts: int = 0
+    ole: int = 0
+    labels: dict[str, int] = field(default_factory=dict)
+
+
+def _unprocessable(name: str, depth: int) -> bool:
+    """Вложение, которое программа не обезличивает: двоичная книга, объект OLE, PDF, слишком глубокая вложенность."""
+    lowered = name.lower()
+    if "/embeddings/" not in lowered or lowered.endswith((".xml", ".rels")) or "/_rels/" in lowered:
+        return False
+    return not (is_embedded_package(name) and depth < 2)
+
+
+def _rels_of(part: str) -> str:
+    folder, base = posixpath.split(part)
+    return posixpath.join(folder, "_rels", base + ".rels")
+
+
+def _rel_target(part: str, rel) -> str:
+    target = rel.get("Target") or ""
+    if rel.get("TargetMode") == "External":
+        return ""
+    if target.startswith("/"):
+        return target.lstrip("/")
+    return posixpath.normpath(posixpath.join(posixpath.dirname(part), target))
+
+
+def _ole_picture(frame):
+    """Объект OLE на слайде превращается в свою же картинку-заместитель (её PowerPoint и так показывает).
+
+    Имя, номер и служебные метки берутся у рамки объекта, изображение и размеры — у картинки из `mc:Fallback`.
+    Без готовой картинки безопасной замены нет: такой объект остаётся, а о нём предупреждают.
+    """
+    picture = next((node for node in frame.iter() if _xml_name(node) == "pic"), None)
+    frame_props = next((node for node in frame if _xml_name(node) == "nvGraphicFramePr"), None)
+    if picture is None or frame_props is None:
+        return None
+    picture = copy.deepcopy(picture)
+    picture_props = next((node for node in picture if _xml_name(node) == "nvPicPr"), None)
+    if picture_props is None:
+        return None
+    for node in list(picture_props):
+        own = next((x for x in frame_props if _xml_name(x) == _xml_name(node)), None)
+        if own is not None and _xml_name(node) in {"cNvPr", "nvPr"}:
+            picture_props.replace(node, copy.deepcopy(own))
+    shape = next((node for node in picture if _xml_name(node) == "spPr"), None)
+    frame_xfrm = next((node for node in frame if _xml_name(node) == "xfrm"), None)
+    if shape is not None and frame_xfrm is not None and not any(_xml_name(x) == "xfrm" for x in shape):
+        a_ns = etree.QName(frame_xfrm[0]).namespace if len(frame_xfrm) else "http://schemas.openxmlformats.org/drawingml/2006/main"
+        xfrm = etree.Element(f"{{{a_ns}}}xfrm", dict(frame_xfrm.attrib))
+        xfrm.extend(copy.deepcopy(x) for x in frame_xfrm)
+        shape.insert(0, xfrm)
+    return picture
+
+
+def drop_embedded_payloads(parsed: dict, names: list[str], depth: int = 0) -> EmbeddedRemoval:
+    """Убирает вложения, которые нельзя обезличить, но без которых документ открывается и выглядит так же.
+
+    * Книга данных диаграммы (`c:externalData` → .xlsb/.xls): в самой диаграмме остаются последние значения
+      (`c:numCache`/`c:strCache`), их текст обезличивается как обычно. Диаграмма рисуется, но править данные нельзя.
+    * Объект OLE на слайде (`p:oleObj` → .bin) заменяется своей картинкой-заместителем из `mc:Fallback`.
+    * Объект OLE в Word (`o:OLEObject`/`w:objectEmbed` в `w:object`) теряет вложение, картинка `v:imagedata` остаётся.
+
+    Объект без картинки, объекты OLE Excel и вложения без ссылок на них не трогаются: о них по-прежнему предупреждение.
+    Книги, документы и презентации внутри файла обезличиваются отдельно и здесь не удаляются.
+    """
+    removal = EmbeddedRemoval()
+    actual = {n.lower(): n for n in names}
+    released: set[str] = set()
+    for part, root in list(parsed.items()):
+        if part.lower().endswith(".rels") or part == "[Content_Types].xml":
+            continue
+        rels = parsed.get(_rels_of(part))
+        if rels is None:
+            continue
+        targets = {rel.get("Id"): actual.get(_rel_target(part, rel).lower(), "") for rel in rels}
+
+        def payload(node) -> str:
+            target = targets.get(node.get(R_ID) or "", "")
+            return target if target and _unprocessable(target, depth) else ""
+
+        candidates: set[str] = set()
+        for node in list(root.iter()):
+            name = _xml_name(node)
+            if name == "externalData" and "/charts/" in part.lower() and payload(node):
+                candidates.add(node.get(R_ID))
+                node.getparent().remove(node)
+                removal.charts += 1
+            elif name == "graphicFrame":
+                data = next((x for x in node.iter() if _xml_name(x) == "graphicData"), None)
+                objects = [x for x in node.iter() if _xml_name(x) == "oleObj"]
+                if data is None or not (data.get("uri") or "").endswith("/ole") or not objects:
+                    continue
+                if not all(payload(x) for x in objects):
+                    continue
+                picture = _ole_picture(node)
+                if picture is None:
+                    continue
+                node.getparent().replace(node, picture)
+                candidates.update(x.get(R_ID) for x in objects)
+                removal.ole += 1
+            elif name in {"OLEObject", "objectEmbed"} and payload(node):
+                holder = node.getparent()
+                if holder is None or not any(_xml_name(x) in {"imagedata", "blip"} for x in holder.iter()):
+                    continue
+                candidates.add(node.get(R_ID))
+                holder.remove(node)
+                removal.ole += 1
+        if not candidates:
+            continue
+        # Ссылка удаляется, только если на неё в части больше ничего не указывает.
+        still_used = {value for node in root.iter() for value in node.attrib.values()}
+        for rel in list(rels):
+            rid = rel.get("Id")
+            if rid in candidates and rid not in still_used:
+                released.add(targets.get(rid, ""))
+                rels.remove(rel)
+    released.discard("")
+    # Одно вложение может быть нужно и другой части (общий объект в макете и на слайде): тогда оно остаётся.
+    referenced = {_rel_target(_rels_owner(part), rel).lower()
+                  for part, rels in parsed.items() if part.lower().endswith(".rels") for rel in rels}
+    removal.parts = {name for name in released if name.lower() not in referenced}
+    for name in removal.parts:
+        label = EMBEDDED_LABELS.get(Path(name.lower()).suffix, f"вложение {Path(name.lower()).suffix or 'без расширения'}")
+        removal.labels[label] = removal.labels.get(label, 0) + 1
+    types = parsed.get("[Content_Types].xml")
+    if types is not None and removal.parts:
+        gone = {"/" + n.lower() for n in removal.parts}
+        gone_ext = {Path(n.lower()).suffix.lstrip(".") for n in removal.parts}
+        left_ext = {Path(n.lower()).suffix.lstrip(".") for n in names if n not in removal.parts}
+        for node in list(types):
+            extension = (node.get("Extension") or "").lower()
+            if (node.get("PartName") or "").lower() in gone or \
+                    (_xml_name(node) == "Default" and extension in gone_ext and extension not in left_ext):
+                types.remove(node)
+    return removal
+
+
+def _rels_owner(rels_part: str) -> str:
+    """`ppt/slides/_rels/slide1.xml.rels` → `ppt/slides/slide1.xml`; `_rels/.rels` → корень пакета."""
+    folder, base = posixpath.split(rels_part)
+    return posixpath.join(posixpath.dirname(folder), base[:-len(".rels")])
 
 
 def classify(path: Path) -> str:
@@ -144,6 +378,7 @@ class TransformContext:
     replaced: dict[str, dict] = field(default_factory=dict)       # исходное → сведения для экрана «Что заменено»
     taken_paths: dict[str, str] = field(default_factory=dict)
     numeric: dict[str, int] = field(default_factory=dict)
+    auto_hidden: set[str] = field(default_factory=set)            # скрыто строгим режимом, а не человеком
 
     def apply_overrides(self, findings: list[Finding]) -> list[Finding]:
         """Решения человека: `hide` заменяет сомнительное, `keep` оставляет найденное как есть."""
@@ -169,7 +404,8 @@ class TransformContext:
                 if finding.category == "POSSIBLE_PERSON":
                     finding.category = "PERSON"
                 finding.confidence = 1.0
-                finding.reason = "Скрыто по решению пользователя"
+                finding.reason = ("Скрыто: включено «Скрывать и сомнительные слова»" if fold(finding.original) in self.auto_hidden
+                                  else "Скрыто по решению пользователя")
         return findings
 
     def token_for(self, finding: Finding) -> str:
@@ -480,11 +716,9 @@ def scan_ooxml(path: Path, rel: str, detector, scrub_metadata: bool, inspect_emb
                     trees.append((name, etree.fromstring(z.read(name), _parser())))
                 except etree.XMLSyntaxError:
                     warnings.append(f"Не удалось безопасно разобрать {name}")
-            detector.person_values |= person_column_values(dict(trees))
-            # Learn the document's own full names before scanning, so its abbreviations resolve.
-            detector.harvest("\n".join(_harvest_source(root, name) for name, root in trees), rel)
+            hints = learn_package(dict(trees), detector, rel)
             for name, root in trees:
-                _, part_findings, _, _ = _scan_xml_tree(root, name, rel, detector, scrub_metadata)
+                _, part_findings, _, _ = _scan_xml_tree(root, name, rel, detector, scrub_metadata, hints)
                 findings.extend(part_findings)
         if inspect_embedded and (snap["media"] or snap["embeddings"]):
             warnings.append("Есть изображения или вложенные объекты, их визуальное содержимое не подтверждено")
@@ -509,7 +743,16 @@ def _metadata_finding(rel: str, loc: str, kind: str, value: str, start: int, rea
                    Decision.AUTO, 1.0, reason=reason)
 
 
-def _scan_text_groups(root, part: str, rel: str, detector, scrub_metadata: bool):
+def _is_metadata_value(segment: Segment, part: str, hints: "PackageHints") -> bool:
+    """Значение свойства документа, которое заменяется целиком. Встроенные имена шаблонов Office не трогаем."""
+    tag = _xml_name(segment.element)
+    if tag == "Template" or (part == "docProps/app.xml" and segment.text.strip() in hints.templates):
+        return not BUILTIN_TEMPLATE_NAME.match(segment.text)
+    return tag in METADATA_TAGS or part.endswith("custom.xml")
+
+
+def _scan_text_groups(root, part: str, rel: str, detector, scrub_metadata: bool, hints: "PackageHints | None" = None):
+    hints = hints or PackageHints()
     findings: list[Finding] = []
     groups: list[tuple[list[Segment], list[Finding]]] = []
     scrub_here = scrub_metadata and part.startswith("docProps/")
@@ -520,13 +763,15 @@ def _scan_text_groups(root, part: str, rel: str, detector, scrub_metadata: bool)
         loc = f"{part}::{group_name}"
         scan_text = _mask_header_codes(text) if group_name.split(":")[0] in HEADER_FOOTER_TAGS else text
         found = detector.scan(scan_text, rel, loc)
+        if hints.person_lists and fold(text.strip()) in hints.person_lists:
+            found = _with_list_items(found, scan_text, rel, loc, detector)
         if scrub_here:
             # Свойство документа обезличивается целиком: часть значения, найденная как имя, не должна оставлять
             # рядом остаток («Mikhail Name1» из «Mikhail V. Zakharov»).
             offset, whole = 0, []
             for segment in segments:
                 value = segment.text
-                is_metadata = _xml_name(segment.element) in METADATA_TAGS or part.endswith("custom.xml")
+                is_metadata = _is_metadata_value(segment, part, hints)
                 if value and segment.writable and is_metadata and not has_token(value):
                     whole.append(_metadata_finding(rel, loc, "metadata", value, offset, "Метаданные документа"))
                 offset += len(value)
@@ -566,14 +811,9 @@ def _shared_strings(parsed: dict) -> list[str]:
     return out
 
 
-def person_column_values(parsed: dict) -> set[str]:
-    """Тексты ячеек из столбцов, в заголовке которых сказано «ФИО», «Фамилия», «Сотрудник» и подобное.
-
-    Название столбца — самая надёжная подсказка, что в ячейке человек: редкая фамилия без имени и отчества
-    («Шин», «Кокубу Масатакэ») иначе неотличима от названия.
-    """
+def _sheet_cells(parsed: dict):
+    """Текстовые ячейки каждого листа: [(столбец, строка, текст)]."""
     strings = _shared_strings(parsed)
-    values: set[str] = set()
     for name, root in parsed.items():
         if not _is_worksheet(name):
             continue
@@ -594,14 +834,216 @@ def person_column_values(parsed: dict) -> set[str]:
                 text = "".join(t.text or "" for t in cell.iter() if _xml_name(t) == "t")
             if text.strip():
                 cells.append((match.group(1), int(match.group(2)), text.strip()))
-        headers: dict[str, int] = {}
-        for column, row, text in cells:
-            if row <= 15 and PERSON_HEADER.search(text) and not NOT_PERSON_HEADER.search(text):
-                headers[column] = max(headers.get(column, 0), row)
-        for column, row, text in cells:
-            if column in headers and row > headers[column] and len(text.split()) <= 4 and re.match(r"^[^\W\d_]", text):
+        yield cells
+
+
+def _column_values(cells, header: re.Pattern, not_header: re.Pattern):
+    """(заголовок, текст) ячеек ниже подходящего заголовка того же столбца."""
+    headers: dict[str, tuple[int, str]] = {}
+    for column, row, text in cells:
+        # «Участники: Орлов, Соколова» — значение с вводным словом, а не заголовок столбца.
+        if re.search(r":\s*\S|;", text):
+            continue
+        if row <= 15 and len(text.split()) <= 5 and header.search(text) and not not_header.search(text):
+            headers[column] = max(headers.get(column, (0, "")), (row, text))
+    for column, row, text in cells:
+        if column in headers and row > headers[column][0]:
+            yield headers[column][1], text
+
+
+# Разделители перечня в одной ячейке: «Иванов И.И.; Петров П.П.», «Участники: Орлов, Соколова».
+LIST_SEPARATOR = re.compile(r"\s*(?:[;\n]|,(?=\s*[^\W\d_]))\s*")
+LIST_PREFIX = re.compile(r"^[^:;,\n]{1,40}:\s*")
+
+
+def list_items(text: str) -> list[tuple[int, int]]:
+    """Границы элементов перечня. Вводная часть до двоеточия («Участники:») элементом не считается."""
+    prefix = LIST_PREFIX.match(text)
+    position = prefix.end() if prefix else 0
+    spans = []
+    for separator in [*LIST_SEPARATOR.finditer(text, position), None]:
+        end = separator.start() if separator else len(text)
+        item = text[position:end]
+        if item.strip():
+            left = position + len(item) - len(item.lstrip())
+            spans.append((left, left + len(item.strip())))
+        if separator:
+            position = separator.end()
+    return spans
+
+
+def _person_columns(parsed: dict) -> tuple[set[str], set[str]]:
+    values: set[str] = set()
+    lists: set[str] = set()
+    for cells in _sheet_cells(parsed):
+        for _, text in _column_values(cells, PERSON_HEADER, NOT_PERSON_HEADER):
+            if len(text.split()) <= 4 and re.match(r"^[^\W\d_]", text):
                 values.add(fold(text))
-    return values
+            if not LIST_SEPARATOR.search(text):
+                continue
+            # Перечень людей в одной ячейке: каждый элемент — такой же человек, как одиночное значение столбца.
+            items = [text[a:b] for a, b in list_items(text)]
+            if len(items) >= 2 and all(len(i.split()) <= 4 and re.match(r"^[^\W\d_]", i) for i in items):
+                values.update(fold(i) for i in items)
+                lists.add(fold(text))
+    return values, lists
+
+
+def person_column_values(parsed: dict) -> set[str]:
+    """Тексты ячеек из столбцов, в заголовке которых сказано «ФИО», «Фамилия», «Сотрудник» и подобное.
+
+    Название столбца — самая надёжная подсказка, что в ячейке человек: редкая фамилия без имени и отчества
+    («Шин», «Кокубу Масатакэ») иначе неотличима от названия. Ячейка-перечень («А; Б; В») даёт каждый свой элемент.
+    """
+    return _person_columns(parsed)[0]
+
+
+# Столбцы с географией: филиал, регион, город, площадка. Их значения выдают, где работает клиент.
+# «Подразделение», «Отдел», «Должность» сюда не относятся: там обычные слова, а не названия мест.
+PLACE_HEADER = re.compile(r"(?i)филиал|регион|город|площадк|территори|локаци|населённ|населенн")
+CITY_HEADER = re.compile(r"(?i)город|площадк|локаци|населённ|населенн")
+NOT_PLACE_HEADER = re.compile(r"(?i)подраздел|отдел|должност|адрес|телефон|почт|e-?mail|\bкод|кол-?во|количеств|числен|"
+                              r"руковод|директор|начальник|менеджер|ответствен|контакт|сотрудник|фио|описани|комментар|"
+                              r"статус|доля|сумм|%")
+PLACE_STOP = {"не указано", "не указан", "н/д", "н.д.", "нет", "да", "все", "-", "—", "итого", "всего", "прочие", "прочее",
+              "другое", "другие", "общий", "общее", "нет данных", "не определено", "без филиала"}
+# Строчные слова, допустимые в названии места: «г. Москва», «Иркутская область», «Олёкминский р-н».
+GEO_DESIGNATOR = re.compile(r"(?i)^(?:г|гор|с|п|пос|пгт|д|ст|рп|обл|р-н|область|края?|района?|округа?|республика)\.?$")
+DOTTED_INITIALS = re.compile(r"\b[А-ЯЁA-Z]\.\s?[А-ЯЁA-Z]\.")
+
+
+# Кириллическая форма состояния: «Выполняется», «Проводится», «Согласовано», «Оплачена».
+STATUS_ENDING = re.compile(r"(?i)(?:ется|ится|ено|ана)$")
+
+
+def _place_like(value: str, header: str) -> bool:
+    """Значение из географического столбца похоже на название места, а не на статус, число или обычное слово."""
+    words = value.split()
+    if not words or len(words) > 3 or fold(value) in PLACE_STOP or fold(value) == fold(header):
+        return False
+    if not re.match(r"^[^\W\d_]", value) or DOTTED_INITIALS.search(value):
+        return False
+    if not all(w[:1].isupper() or GEO_DESIGNATOR.match(w) for w in words):
+        return False
+    core = [w for w in words if not GEO_DESIGNATOR.match(w)]
+    for word in core:
+        # Окончание формы состояния не касается известных городов: «Астана» остаётся местом.
+        if lexicon.is_status_word(word) or (re.search("[а-яё]", word, re.I) and STATUS_ENDING.search(word)
+                                            and not lexicon.is_toponym(word)):
+            return False
+    # Словарное слово годится только как прилагательное места («Дальневосточный», «Кузбасский»): «Код», «Выручка»,
+    # «Основной» из соседней таблицы под тем же столбцом — обычные слова.
+    return not all(lexicon.is_common_word(w) and not lexicon.is_geo_adjective(w) for w in core)
+
+
+def _geo_cue(value: str, text: str) -> bool:
+    """Значение где-то ещё в книге стоит рядом с географическим словом: «г. Х», «в Х», «филиал Х», «Х район»."""
+    name = re.escape(value)
+    return bool(re.search(rf"(?i)(?:\b(?:г|гор|пос|пгт|с|д|ст)\.\s*|\b(?:город\w*|филиал\w*|регион\w*|в|во|из)\s+){name}(?!\w)"
+                          rf"|(?<!\w){name}\s+(?:област|кра[йяею]|район|округ)", text))
+
+
+def place_column_values(parsed: dict) -> dict[str, str]:
+    """Значение из столбца «Филиал», «Регион», «Город», «Площадка» → вид (CITY или REGION).
+
+    Столбец засчитывается, только если в нём хотя бы два разных похожих на место значения: одиночное значение под
+    случайным заголовком («Регион выполнения» над столбцом статусов) — не довод. Одиночное принимается, если оно
+    ещё где-то в книге стоит рядом с географическим словом.
+    """
+    out: dict[str, str] = {}
+    for cells in _sheet_cells(parsed):
+        columns: dict[str, list[str]] = {}
+        for header, text in _column_values(cells, PLACE_HEADER, NOT_PLACE_HEADER):
+            value = " ".join(text.split())
+            if _place_like(value, header) and value not in columns.setdefault(header, []):
+                columns[header].append(value)
+        everything = None
+        for header, values in columns.items():
+            if len(values) < 2:
+                everything = everything if everything is not None else "\n".join(t for _, _, t in cells)
+                values = [v for v in values if _geo_cue(v, everything)]
+            for value in values:
+                out.setdefault(value, "CITY" if CITY_HEADER.search(header) else "REGION")
+    return out
+
+
+def register_place_values(parsed: dict, detector, rel: str) -> None:
+    """Значения географических столбцов становятся известными названиями для всей книги, в том числе для текста.
+
+    Что детектор и так скрывает целиком (город из справочника, известная организация), не трогаем: у него уже есть
+    свой вид. Опознанный человек в таком столбце тоже не место; а «похоже на фамилию» у прилагательного на -ский
+    («Заречинский») в столбце «Филиал» — ошибка формы слова, а не человек.
+    """
+    entities = getattr(detector, "entities", None)
+    if entities is None:
+        return
+    for value, kind in place_column_values(parsed).items():
+        if fold(value) in detector.person_values:
+            continue
+        probe = detector.scan(value, rel, "column:place")
+        if any(f.category == "PERSON" and f.decision == Decision.AUTO for f in probe):
+            continue
+        if any(f.decision == Decision.AUTO and f.start <= 0 and f.end >= len(value) for f in probe):
+            continue
+        entities.register(kind, value, explicit=True)
+
+
+def _with_list_items(found: list[Finding], text: str, rel: str, loc: str, detector) -> list[Finding]:
+    """Ячейка-перечень людей: каждый элемент проверяется ещё и как отдельное значение столбца.
+
+    Внутри длинной строки редкая фамилия без имени («Громов») не узнаётся, а как одиночное значение столбца
+    «Участники» — узнаётся. Находка по элементу заменяет находки внутри него; частично пересекающиеся не трогаем.
+    """
+    result = list(found)
+    for start, end in list_items(text):
+        if any(f.decision == Decision.AUTO and f.start <= start and f.end >= end for f in result):
+            continue
+        for f in detector.scan(text[start:end], rel, loc):
+            a, b = f.start + start, f.end + start
+            inside = [g for g in result if g.start >= a and g.end <= b]
+            if any(g.start < b and g.end > a and g not in inside for g in result):
+                continue
+            if inside and f.decision != Decision.AUTO:
+                continue
+            result = [g for g in result if g not in inside]
+            result.append(replace(f, start=a, end=b, finding_id=finding_id(f.file, f.location, a, b, f.original)))
+    return sorted(result, key=lambda f: f.start)
+
+
+@dataclass
+class PackageHints:
+    """Что известно о файле целиком ещё до разбора частей."""
+    templates: set[str] = field(default_factory=set)      # имена тем и шаблона, придуманные автором
+    person_lists: set[str] = field(default_factory=set)   # ячейки-перечни людей (свёрнутый текст)
+
+
+def template_names(parsed: dict) -> set[str]:
+    """Имена тем, палитр и шаблона, кроме встроенных: они же повторяются в перечне частей app.xml."""
+    names: set[str] = set()
+    for part, root in parsed.items():
+        lowered = part.lower()
+        if "/theme/" not in lowered and lowered != "docprops/app.xml":
+            continue
+        for node in root.iter():
+            if not isinstance(node.tag, str):
+                continue
+            element = _xml_name(node)
+            if element == "Template" and node.text:
+                names.add(node.text.strip())
+            names.update(node.get(attr) for el, attr in TEMPLATE_NAME_ATTRS if el == element and node.get(attr))
+    names = {n.strip() for n in names if n.strip() and not BUILTIN_TEMPLATE_NAME.match(n)}
+    # В перечне частей имя шаблона пишется без расширения.
+    return names | {re.sub(r"(?i)\.(?:pot|dot|xlt)[xm]?$", "", n) for n in names}
+
+
+def learn_package(parsed: dict, detector, rel: str) -> PackageHints:
+    """Обучение детектора на файле целиком до замены: люди из столбцов «ФИО», места из столбцов «Филиал», полные имена."""
+    persons, lists = _person_columns(parsed)
+    detector.person_values |= persons
+    # Learn the document's own full names before scanning, so its abbreviations resolve.
+    detector.harvest("\n".join(_harvest_source(root, name) for name, root in parsed.items()), rel)
+    register_place_values(parsed, detector, rel)
+    return PackageHints(template_names(parsed), lists)
 
 
 def _harvest_source(root, part: str) -> str:
@@ -671,15 +1113,19 @@ def _scan_attributes(root, part: str, rel: str, detector, scrub_metadata: bool):
                 found = [_metadata_finding(rel, loc, "local-path", value, 0, "Путь на компьютере автора")]
             if scrub_metadata and sensitive and not found and not has_token(value):
                 found = [_metadata_finding(rel, loc, "metadata-attr", value, 0, "Метаданные автора")]
+            if scrub_metadata and (element_name, attr_name) in TEMPLATE_NAME_ATTRS and not has_token(value) \
+                    and not BUILTIN_TEMPLATE_NAME.match(value):
+                # Имя темы — ярлык шаблона, а не содержимое: заменяется целиком, смысл документа от этого не страдает.
+                found = [_metadata_finding(rel, loc, "template-name", value, 0, "Имя темы или шаблона оформления")]
             if found:
                 findings.extend(found)
                 groups.append((node, attr, found))
     return findings, groups
 
 
-def _scan_xml_tree(root, part: str, rel: str, detector, scrub_metadata: bool):
+def _scan_xml_tree(root, part: str, rel: str, detector, scrub_metadata: bool, hints: PackageHints | None = None):
     """Findings for one already-parsed part, so a part is never parsed more than once."""
-    text_findings, text_groups = _scan_text_groups(root, part, rel, detector, scrub_metadata)
+    text_findings, text_groups = _scan_text_groups(root, part, rel, detector, scrub_metadata, hints)
     attr_findings, attr_groups = _scan_attributes(root, part, rel, detector, scrub_metadata)
     return root, text_findings + attr_findings, text_groups, attr_groups
 
@@ -752,19 +1198,29 @@ def transform_ooxml(src: Path, dst: Path, rel: str, detector, ctx: TransformCont
                         parsed[info.filename] = etree.fromstring(zin.read(info.filename), _parser())
                     except etree.XMLSyntaxError:
                         warnings.append(f"Не обработан внутренний XML: {info.filename}")
-            detector.person_values |= person_column_values(parsed)
-            detector.harvest("\n".join(_harvest_source(root, name) for name, root in parsed.items()), rel)
+            hints = learn_package(parsed, detector, rel)
+            thumbnails = drop_thumbnails(parsed, zin.namelist()) if ctx.settings.scrub_metadata else set()
+            removal = drop_embedded_payloads(parsed, zin.namelist(), depth) if ctx.settings.scrub_metadata \
+                else EmbeddedRemoval()
+            dropped = thumbnails | removal.parts
             numbers_on = ctx.settings.numbers and src.suffix.lower() == ".xlsx"
             date_styles: set[int] = set()
             avoid: set[str] = set()
-            if numbers_on:
+            amounts = 0
+            if src.suffix.lower() == ".xlsx":
                 styles = parsed.get("xl/styles.xml")
                 date_styles = numeric.date_style_indexes(styles) if styles is not None else set()
+            if numbers_on:
                 for name, root in parsed.items():
                     if _is_worksheet(name):
                         avoid.update(canon for _, _, canon in numeric.numeric_cells(root, date_styles))
+            elif src.suffix.lower() == ".xlsx" and depth == 0:
+                amounts = sum(numeric.should_replace(canon) for name, root in parsed.items() if _is_worksheet(name)
+                              for _, _, canon in numeric.numeric_cells(root, date_styles))
             with zipfile.ZipFile(tmp_name, "w") as zout:
                 for info in zin.infolist():
+                    if info.filename in dropped:
+                        continue
                     raw = zin.read(info.filename)
                     root = parsed.get(info.filename)
                     if root is None and is_embedded_package(info.filename) and depth < 2:
@@ -773,7 +1229,7 @@ def transform_ooxml(src: Path, dst: Path, rel: str, detector, ctx: TransformCont
                         warnings.extend(f"{info.filename}: {w}" for w in inner.warnings)
                     if root is not None:
                         _, part_findings, groups, attrs = _scan_xml_tree(root, info.filename, rel, detector,
-                                                                         ctx.settings.scrub_metadata)
+                                                                         ctx.settings.scrub_metadata, hints)
                         part_findings = ctx.apply_overrides(part_findings)
                         by_id = {f.finding_id: f for f in part_findings}
                         findings.extend(part_findings)
@@ -808,20 +1264,36 @@ def transform_ooxml(src: Path, dst: Path, rel: str, detector, ctx: TransformCont
             os.unlink(tmp_name)
     after = _zip_snapshot(dst)
     structural_keys = ("sheets", "slides", "formulas", "tables", "charts", "comments", "media", "embeddings", "macros", "signatures")
-    integrity_ok = (before["names"] == after["names"] and before["binary_hashes"] == after["binary_hashes"]
-                    and all(before[k] == after[k] for k in structural_keys))
+    # Удалённые эскиз и вложения — намеренное отличие, а не порча структуры.
+    expected_names = [n for n in before["names"] if n not in dropped]
+    expected_hashes = {n: h for n, h in before["binary_hashes"].items() if n not in dropped}
+    expected = {**before, "embeddings": before["embeddings"] - len(removal.parts)}
+    integrity_ok = (expected_names == after["names"] and expected_hashes == after["binary_hashes"]
+                    and all(expected[k] == after[k] for k in structural_keys))
     residual = _residuals(detector, "\n".join(output_text), findings)
     if not integrity_ok:
         warnings.append("Нарушена структурная целостность OOXML")
     if residual:
         warnings.append("После обработки остались критические совпадения")
+    embedded = unprocessed_embeddings(after["names"], depth) if ctx.settings.inspect_embedded else {}
+    if embedded:
+        warnings.append(embedded_warning(embedded))
     notices: list[str] = []
-    if ctx.settings.inspect_embedded and (after["media"] or after["embeddings"]):
-        notices.append(f"В файле есть изображения или вложенные объекты ({after['media'] + after['embeddings']}). "
+    if thumbnails:
+        notices.append("Эскиз первой страницы удалён: на этой картинке читалось исходное содержимое. "
+                       "Office создаст новый эскиз при следующем сохранении")
+    if removal.parts:
+        notices.append(removal_notice(removal))
+    if ctx.settings.inspect_embedded and after["media"]:
+        notices.append(f"В файле есть изображения ({after['media']}). "
                        "Текст на картинках программа не читает: проверьте их вручную")
+    if amounts >= MANY_AMOUNTS:
+        notices.append(f"Числа в таблицах не обезличены (значений: {amounts}). Если суммы и показатели — коммерческая "
+                       "тайна, включите «Заменять числа в Excel» и обезличьте файл заново")
     status = FileStatus.CLEAN if integrity_ok and not residual and not warnings else FileStatus.REVIEW_REQUIRED
     result = FileResult(rel, "OOXML", status, findings, warnings, str(dst),
-                        {"open_ok": True, "structure_equal": integrity_ok, "before": before, "after": after})
+                        {"open_ok": True, "structure_equal": integrity_ok, "before": before, "after": after,
+                         "dropped": sorted(dropped)})
     result.notices = notices
     return result
 

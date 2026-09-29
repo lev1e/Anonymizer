@@ -30,6 +30,9 @@ Progress = Callable[[float, str], None]
 
 SUFFIX_ANON = " (обезличено)"
 SUFFIX_RESTORED = " (восстановлено)"
+# Нейтральное имя результата: «Файл3 (обезличено).docx». Номер ведёт хранилище, по нему возврат находит исходное имя.
+NEUTRAL_STEM = "Файл"
+NEUTRAL_NAME = re.compile(rf"^{NEUTRAL_STEM}(\d{{1,7}})(?!\d)")
 MAX_UPLOAD_BYTES = 300 * 1024 * 1024
 KNOWLEDGE_KINDS = {"ORG", "PROJECT", "CITY", "REGION", "DOMAIN", "TERM"}
 
@@ -51,6 +54,23 @@ UNSUPPORTED_HELP = {
 }
 
 FORMAT_LABEL = {"TEXT": "Текст", "OOXML": "Office", "PDF": "PDF"}
+
+# Части файла, где нет содержимого документа: образцы и макеты слайдов, темы, свойства файла. Слово оттуда
+# («Embedded OLE Servers», «Office Theme») не повод для подсказки: если оно есть в тексте, подсказка придёт оттуда,
+# а решение пользователя всё равно применится к каждому вхождению.
+NON_CONTENT_PARTS = ("slidemasters", "slidelayouts", "notesmasters", "handoutmasters", "docprops/", "/theme/",
+                     "presprops.xml", "viewprops.xml", "tablestyles.xml", "/styles.xml", "fonttable.xml", "websettings.xml")
+# Замещающий текст картинок и подсказки ссылок.
+ALT_TEXT_MARKS = (":cNvPr:descr", ":cNvPr:title", ":docPr:descr", ":docPr:title", ":hyperlink:tooltip")
+# Подсказок каждого вида не больше этого: сильные важнее, и слабые не должны вытеснять их из списка.
+STRONG_LIMIT, WEAK_LIMIT = 200, 60
+# Строгий режим: сколько раз можно повторить проход, скрывая подсказки предыдущего (после замены могут всплыть новые).
+STRICT_PASSES = 2
+
+
+def not_content(location: str) -> bool:
+    part = location.split("::", 1)[0].lower()
+    return any(mark in part for mark in NON_CONTENT_PARTS)
 
 
 @dataclass
@@ -144,6 +164,10 @@ def safe_name(name: str) -> str:
     # macOS отдаёт имена в разложенной форме («й» из двух знаков): ни Windows, ни поиск по тексту такого не ждут.
     base = re.split(r"[\\/]", unicodedata.normalize("NFC", name))[-1].strip().strip(".") or "file"
     base = re.sub(r'[<>:"|?*\x00-\x1f]', "_", base)
+    stem, dot, ext = base.rpartition(".")
+    if len(base) > 150 and dot and stem and 0 < len(ext) <= 10:
+        # Длинное имя укорачивается до расширения: без него файл не распознать.
+        return f"{stem[:149 - len(ext)].rstrip()}.{ext}"
     return base[:150]
 
 
@@ -233,10 +257,11 @@ class Service:
         prefs = self.vault.prefs
         hide = list(dict.fromkeys([*prefs.get("hide_terms", []), *options.get("hide_terms", [])]))
         keep = list(dict.fromkeys([*prefs.get("keep_terms", []), *options.get("keep_terms", [])]))
-        numbers = options.get("numbers")
-        strict = options.get("strict")
-        return Settings(numbers=prefs.get("numbers", False) if numbers is None else bool(numbers),
-                        strict=prefs.get("strict", False) if strict is None else bool(strict),
+        def choice(name: str, default: bool) -> bool:
+            value = options.get(name)
+            return bool(prefs.get(name, default)) if value is None else bool(value)
+        return Settings(numbers=choice("numbers", False), strict=choice("strict", False),
+                        countries=choice("countries", False), neutral_names=choice("neutral_names", True),
                         suggest=True, hide_terms=[t for t in hide if t.strip()],
                         keep_terms=[t for t in keep if t.strip()])
 
@@ -260,14 +285,11 @@ class Service:
                 job.snapshot = (self.vault.snapshot(), self._commit_counter)
             job.options = options
             settings = self.settings_for(options)
-            detector = self.build_detector(settings)
-            ctx = TransformContext(self.vault, settings, detector,
-                                   overrides={fold(k): v for k, v in (overrides or {}).items()})
+            user_overrides = {fold(k): v for k, v in (overrides or {}).items()}
             def report(percent: float, stage: str) -> None:
                 job.percent, job.stage = percent, stage
                 if progress:
                     progress(percent, stage)
-            names_taken: dict[str, int] = {}
             paths: list[tuple[Upload, Path, str]] = []
             for index, upload in enumerate(uploads):
                 name = safe_name(upload.name)
@@ -276,27 +298,59 @@ class Service:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(upload.data)
                 paths.append((upload, path, classify(path)))
-            supported = [(u, p, k) for u, p, k in paths if k in FORMAT_LABEL]
-            if len(supported) > 1:
-                # Первый проход только обучает детектор: полное ФИО из одного файла расшифровывает
-                # инициалы в другом, и результат не зависит от порядка файлов.
-                for index, (upload, path, kind) in enumerate(supported):
-                    report(index / (2 * len(supported)), f"Анализ: {path.name}")
-                    self._learn(detector, path, kind)
-            outcomes: list[FileOutcome] = []
-            suggestions: dict[str, dict] = {}
-            for index, (upload, path, kind) in enumerate(paths):
-                base = (len(supported) > 1) * .5
-                report(base + (index / max(1, len(paths))) * (1 - base), f"Обезличивание: {path.name}")
-                outcome = self._anonymize_one(job, upload, path, kind, detector, ctx, suggestions, names_taken)
-                outcomes.append(outcome)
+            before = self.vault.snapshot() if settings.strict else None
+            ctx, outcomes, suggestions = self._pass(job, paths, settings, user_overrides, report)
+            auto_hide: dict[str, str] = {}
+            for _ in range(STRICT_PASSES):
+                # «Скрывать и сомнительные слова»: всё, что попало бы в «Возможно, нужно скрыть ещё», скрывается тем же
+                # способом, как если бы человек отметил эти слова и обезличил заново. Слова из «Никогда не скрывать» и
+                # решения самого человека («оставить») не трогаются. Прошлый проход откатывается, чтобы в нумерации
+                # меток не было пропусков.
+                fresh = self._strict_overrides(suggestions, settings, {**auto_hide, **user_overrides})
+                if not settings.strict or not fresh:
+                    break
+                auto_hide.update(fresh)
+                self.vault.rollback(before)
+                shutil.rmtree(job.dir / "out", ignore_errors=True)
+                ctx, outcomes, suggestions = self._pass(job, paths, settings, {**auto_hide, **user_overrides}, report,
+                                                        set(auto_hide))
             job.files = outcomes
             self._commit_job(job, "anonymize", outcomes, ctx)
             job.result = self._anonymize_result(job, ctx, suggestions)
+            job.result["strict_hidden"] = len([k for k in auto_hide if k not in user_overrides])
+            job.result["overrides"] = user_overrides
             job.state = "done"
             job.percent = 1.0
             report(1.0, "Готово")
             return job
+
+    def _pass(self, job: Job, paths: list, settings: Settings, overrides: dict[str, str], report,
+              auto_hidden: set[str] | None = None) -> tuple[TransformContext, list[FileOutcome], dict]:
+        """Один проход по всем файлам задания со свежим детектором."""
+        detector = self.build_detector(settings)
+        ctx = TransformContext(self.vault, settings, detector, overrides=overrides, auto_hidden=auto_hidden or set())
+        names_taken: dict[str, int] = {}
+        supported = [(u, p, k) for u, p, k in paths if k in FORMAT_LABEL]
+        if len(supported) > 1:
+            # Первый проход только обучает детектор: полное ФИО из одного файла расшифровывает
+            # инициалы в другом, и результат не зависит от порядка файлов.
+            for index, (upload, path, kind) in enumerate(supported):
+                report(index / (2 * len(supported)), f"Анализ: {path.name}")
+                self._learn(detector, path, kind)
+        outcomes: list[FileOutcome] = []
+        suggestions: dict[str, dict] = {}
+        for index, (upload, path, kind) in enumerate(paths):
+            base = (len(supported) > 1) * .5
+            report(base + (index / max(1, len(paths))) * (1 - base), f"Обезличивание: {path.name}")
+            outcomes.append(self._anonymize_one(job, upload, path, kind, detector, ctx, suggestions, names_taken))
+        return ctx, outcomes, suggestions
+
+    @staticmethod
+    def _strict_overrides(suggestions: dict, settings: Settings, decided: dict[str, str]) -> dict[str, str]:
+        """Подсказки, которые строгий режим скрывает сам: все, кроме уже решённых и слов из «Никогда не скрывать»."""
+        keep = {fold(t) for t in settings.keep_terms}
+        return {key: "hide" for key, entry in suggestions.items()
+                if key not in decided and key not in keep and fold(entry["text"]) not in keep}
 
     def rerun(self, job_id: str, options: dict, overrides: dict[str, str], progress: Progress | None = None,
               job: Job | None = None) -> Job:
@@ -416,8 +470,7 @@ class Service:
                 continue
             if ctx.overrides.get(fold(finding.original)) == "keep":
                 continue
-            if any(mark in finding.location.lower() for mark in ("slidemasters", "slidelayouts", "notesmasters",
-                                                                 "handoutmasters")):
+            if not_content(finding.location):
                 continue
             entry = suggestions.setdefault(fold(finding.original), {
                 "text": finding.original, "reason": finding.reason, "count": 0, "context": finding.context,
@@ -433,6 +486,11 @@ class Service:
         обычные термины. Их список показывается, но тревогу не поднимает.
         """
         word = finding.original
+        if any(mark in finding.location for mark in ALT_TEXT_MARKS):
+            # Замещающий текст и подсказки пишут для людей: «Логотип Вектор-Строй», «Схема склада Альфа». Слово с заглавной
+            # там почти всегда название, а текст этот никто не видит на слайде и не проверит глазами. Поэтому здесь даже
+            # латиница и аббревиатуры идут в сильные подсказки. Сам текст сохраняется: он нужен для доступности.
+            return True
         if finding.category == "POSSIBLE_PERSON":
             return finding.confidence >= .6
         # «МВтч», «кВт»: прописные буквы и строчный хвост — единица измерения или сокращение, а не название.
@@ -445,6 +503,10 @@ class Service:
         # Подчёркивание — обычный разделитель слов в именах файлов, а для разбора оно часть слова.
         probe = stem.replace("_", " ")
         detector.harvest(probe, name)
+        if ctx.settings.neutral_names:
+            # Имя файла обычно выдаёт клиента или проект («Реестр_Клиент.xlsx»), а детектор узнаёт не всякое слово.
+            # Поэтому имя заменяется целиком; исходное хранится в хранилище и возвращается при восстановлении.
+            return f"{NEUTRAL_STEM}{self.vault.file_number(name)}{SUFFIX_ANON}{ext}"
         findings = ctx.apply_overrides(detector.scan(probe, name, "filename"))
         new_stem = replace_findings(stem, findings, ctx) if findings else stem
         return f"{new_stem}{SUFFIX_ANON}{ext}"
@@ -471,10 +533,15 @@ class Service:
         summary = [{"group": g, "label": GROUP_LABELS.get(g, g), "count": ctx.counts[g],
                     "unique": len({e["token"].split("_")[0] for e in groups.get(g, [])})}
                    for g in GROUP_LABELS if g != "hidden" and ctx.counts.get(g)]
-        ranked = sorted(suggestions.values(), key=lambda e: (not e["strong"], -e["count"], e["text"]))[:60]
+        order = sorted(suggestions.values(), key=lambda e: (-e["count"], e["text"]))
+        strong = [e for e in order if e["strong"]]
+        weak = [e for e in order if not e["strong"]]
         return {"summary": summary, "groups": {GROUP_LABELS.get(g, g): v[:400] for g, v in groups.items()},
                 "groups_order": [GROUP_LABELS.get(g, g) for g in GROUP_LABELS if g in groups],
-                "suggestions": ranked, "total": sum(n for g, n in ctx.counts.items() if g != "hidden"), "numbers": dict(ctx.numeric),
+                "suggestions": strong[:STRONG_LIMIT] + weak[:WEAK_LIMIT],
+                # Сколько подсказок каждого вида всего: слабые никто не просматривал, и экран должен об этом сказать.
+                "strong_total": len(strong), "weak_total": len(weak),
+                "total": sum(n for g, n in ctx.counts.items() if g != "hidden"), "numbers": dict(ctx.numeric),
                 "overrides": ctx.overrides, "remembered": job.options.get("remembered", {})}
 
     # -- восстановление -------------------------------------------------------
@@ -526,7 +593,13 @@ class Service:
         restorer = rs.Restorer(self.vault)
         stem, ext = split_ext(path.name)
         stem = stem.replace(SUFFIX_ANON, "").replace("_anon", "")
-        out_name = self._restored_name(stem) + SUFFIX_RESTORED + ext
+        neutral = NEUTRAL_NAME.match(stem)
+        original = self.vault.original_file_name(int(neutral.group(1))) if neutral else None
+        if original:
+            stem = split_ext(original)[0] + self._restored_name(stem[neutral.end():])
+        else:
+            stem = self._restored_name(stem)
+        out_name = stem + SUFFIX_RESTORED + ext
         dst = job.dir / "out" / out_name
         counter = 2
         while dst.exists():

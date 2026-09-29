@@ -115,7 +115,7 @@ class BridgeTests(unittest.TestCase):
         two = self.write("два.txt", "Ольга Иванова")
         self.window.answers = [(one, two)]
         ids = [f["info"]["id"] for f in self.bridge.pick_files()["files"]]
-        job_id = self.app.start_job("anonymize", ids, {})
+        job_id = self.app.start_job("anonymize", ids, {"neutral_names": False})
         self.app.runners[job_id].join(60)
         target = self.env.base / "out"
         target.mkdir()

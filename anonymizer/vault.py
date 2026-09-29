@@ -29,7 +29,9 @@ DEFAULT_PREFS = {
     "hide_terms": [],          # всегда скрывать
     "keep_terms": [],          # никогда не скрывать
     "numbers": False,          # заменять числа суррогатами (только Excel)
-    "strict": False,           # скрывать также должности и подразделения
+    "strict": False,           # скрывать и сомнительные слова: всё из списка «Возможно, нужно скрыть ещё»
+    "countries": False,        # скрывать страны
+    "neutral_names": True,     # называть результат «Файл1 (обезличено)» вместо исходного имени
 }
 
 MAX_HISTORY = 200
@@ -64,6 +66,7 @@ class Vault:
         self.by_key: dict[str, str] = {}
         self.numbers: dict[str, str] = {}        # исходное → суррогат (канонические записи)
         self.numbers_back: dict[str, str] = {}   # суррогат → исходное
+        self.file_names: dict[str, str] = {}     # номер нейтрального имени («Файл3» → "3») → исходное имя файла
         self.prefs: dict = json.loads(json.dumps(DEFAULT_PREFS))
         self.history: list[dict] = []
         # Идентификатор хранилища попадает в обезличенные файлы. По нему при возврате видно, что файл сделан другим
@@ -96,7 +99,7 @@ class Vault:
 
     def _payload(self) -> dict:
         return {"version": 1, "counters": self.counters, "entities": self.entities, "numbers": self.numbers,
-                "prefs": self.prefs, "history": self.history, "vault_id": self.vault_id, "known_ids": sorted(self.known_ids)}
+                "file_names": self.file_names, "prefs": self.prefs, "history": self.history, "vault_id": self.vault_id, "known_ids": sorted(self.known_ids)}
 
     def _load(self) -> None:
         blob = self.path.read_bytes()
@@ -112,6 +115,7 @@ class Vault:
         self.entities = data.get("entities", {})
         self.numbers = data.get("numbers", {})
         self.numbers_back = {v: k for k, v in self.numbers.items()}
+        self.file_names = {str(k): v for k, v in data.get("file_names", {}).items()}
         self.prefs = {**json.loads(json.dumps(DEFAULT_PREFS)), **data.get("prefs", {})}
         self.history = data.get("history", [])
         self.vault_id = data.get("vault_id") or self.vault_id
@@ -157,11 +161,11 @@ class Vault:
     def snapshot(self):
         """Состояние до задания: повторный проход с правками пользователя не должен оставлять пропусков в нумерации."""
         with self._lock:
-            return copy.deepcopy((self.counters, self.entities, self.numbers, self.history))
+            return copy.deepcopy((self.counters, self.entities, self.numbers, self.history, self.file_names))
 
     def rollback(self, snap) -> None:
         with self._lock:
-            self.counters, self.entities, self.numbers, self.history = copy.deepcopy(snap)
+            self.counters, self.entities, self.numbers, self.history, self.file_names = copy.deepcopy(snap)
             self.numbers_back = {v: k for k, v in self.numbers.items()}
             self.by_key = {self._key_of(e["kind"], e["key"]): base for base, e in self.entities.items()}
             self.dirty = True
@@ -171,6 +175,7 @@ class Vault:
         with self._lock:
             self.counters, self.entities, self.by_key = {}, {}, {}
             self.numbers, self.numbers_back, self.history = {}, {}, []
+            self.file_names = {}
             # Нумерация начинается заново, поэтому файлы, обезличенные раньше, больше не относятся к этому хранилищу.
             self.vault_id = opaque_id(6).lower()
             self.known_ids = {self.vault_id}
@@ -251,6 +256,22 @@ class Vault:
     def original_of_surrogate(self, surrogate: str) -> str | None:
         return self.numbers_back.get(surrogate)
 
+    # -- нейтральные имена файлов ---------------------------------------------
+
+    def file_number(self, original: str) -> int:
+        """Номер нейтрального имени для исходного имени файла: одно и то же имя всегда получает один номер."""
+        with self._lock:
+            for number, name in self.file_names.items():
+                if name == original:
+                    return int(number)
+            number = max((int(n) for n in self.file_names), default=0) + 1
+            self.file_names[str(number)] = original
+            self.dirty = True
+            return number
+
+    def original_file_name(self, number: int) -> str | None:
+        return self.file_names.get(str(number))
+
     # -- настройки и журнал ---------------------------------------------------
 
     def set_prefs(self, **values) -> None:
@@ -313,6 +334,8 @@ class Vault:
                 for original, surrogate in data.get("numbers", {}).items():
                     self.numbers.setdefault(original, surrogate)
                 self.numbers_back = {v: k for k, v in self.numbers.items()}
+                for number, name in data.get("file_names", {}).items():
+                    self.file_names.setdefault(str(number), name)
                 self.by_key = {self._key_of(e["kind"], e["key"]): b for b, e in self.entities.items()}
             self.dirty = True
             self.save()

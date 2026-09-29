@@ -1,5 +1,6 @@
 """Настоящие файлы из папки case: полный круг и проверка, что чувствительное не осталось."""
 import io
+import json
 import re
 import unittest
 import zipfile
@@ -13,19 +14,18 @@ from .helpers import CASE_DIR, Env, content_units, zip_text
 
 CASE_FILES = sorted(p for ext in ("xlsx", "docx", "pptx") for p in CASE_DIR.glob(f"*.{ext}")) if CASE_DIR.is_dir() else []
 
-# Значения, которые в обезличенных файлах встречаться не должны ни в каком виде.
+# Значения, которые в обезличенных файлах встречаться не должны ни в каком виде. Здесь только выдуманные демо-файлы;
+# слова из настоящих документов лежат в case/must_disappear.json (папка case не публикуется) и добавляются при наличии.
 MUST_DISAPPEAR = {
     "Данные Клиента.xlsx": ["Аврора-Гидропроект", "Аврора-3", "Северцев"],
     "Коммерческие условия.docx": ["Аврора-Гидропроект", "Аврора-3"],
     "Маркетинг.pptx": ["Аврора-Гидропроект", "Аврора-3", "Каскад-Энерго", "ГидроВолга"],
-    "20261709_Кейс_v1.pptx": ["Напитки Вместе", "Технологии Доверия", "ТеДо", "Carlsberg", "PwC", "Нильсен", "tedo.ru",
-                              "Санкт-Петербург", "Красноярск", "Екатеринбург", "Новосибирск"],
-    "0. Сравнение с ЗУП и списками сотрудников (9).xlsx": ["sumitec", "Хабаровск", "Кемерово", "Красноярск",
-                                                          "Абысов", "Vitaly", "xenon118@yandex.ru"],
-    "20260709Склад_и_управление_запасами(3).xlsx": ["Сумитек", "Горностаев", "Гущин", "Усольцева", "Кузбасс"],
-    "Реестр процессов_Продажи ЗЧ и Сервиса(1).xlsx": ["Шангареев", "Севрюков", "Клец Денис", "Кузбасс"],
     "Тестовый кейс_анонимайзер_демо.docx": ["Аврора-Гидропроект", "Аврора-3"],
 }
+_PRIVATE_TERMS = CASE_DIR / "must_disappear.json"
+if _PRIVATE_TERMS.is_file():
+    for _name, _terms in json.loads(_PRIVATE_TERMS.read_text(encoding="utf-8")).items():
+        MUST_DISAPPEAR[_name] = list(dict.fromkeys([*MUST_DISAPPEAR.get(_name, []), *_terms]))
 
 
 @unittest.skipUnless(CASE_FILES, "папка case отсутствует")
@@ -52,7 +52,8 @@ class CaseFilesTests(unittest.TestCase):
     def test_warnings_are_only_about_images(self):
         for outcome in self.job.files:
             for message in outcome.messages:
-                if message["level"] == "warn":
+                # Необезличенные встроенные объекты (.xlsb, OLE) — настоящий риск, о нём предупреждать обязательно.
+                if message["level"] == "warn" and not message["text"].startswith("Вложенные объекты не обезличены"):
                     self.fail(f"{outcome.name}: {message['text']}")
 
     def test_sensitive_values_are_gone_from_every_file(self):
@@ -83,7 +84,10 @@ class CaseFilesTests(unittest.TestCase):
     def test_structure_is_unchanged(self):
         for i, outcome in enumerate(self.job.files):
             source = CASE_DIR / outcome.name
-            before = zipfile.ZipFile(source).namelist()
+            # Эскиз первой страницы удаляется намеренно: на картинке читается исходное содержимое. Так же намеренно удаляются
+            # вложения, которые программа не обезличивает (книга .xlsb диаграммы, объект OLE .bin).
+            before = [n for n in zipfile.ZipFile(source).namelist() if not n.startswith("docProps/thumbnail")
+                      and not ("/embeddings/" in n and n.lower().endswith((".bin", ".xlsb", ".xls")))]
             after = zipfile.ZipFile(outcome.out_path).namelist()
             self.assertEqual(sorted(before), sorted(after), outcome.name)
 
@@ -91,7 +95,8 @@ class CaseFilesTests(unittest.TestCase):
         for i, outcome in enumerate(self.restored.files):
             with self.subTest(file=outcome.name):
                 self.assertNotEqual(outcome.status, "error", outcome.messages)
-                original_name = re.sub(r" \(обезличено\)", "", outcome.name)
+                # Возврат называет файл исходным именем, даже если обезличенный получил нейтральное «Файл1».
+                original_name = re.sub(r" \(восстановлено\)", "", outcome.out_name)
                 original = content_units(CASE_DIR / original_name)
                 restored = content_units(Path(outcome.out_path))
                 differing = [k for k in original if original[k] != restored.get(k)]

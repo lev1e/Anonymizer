@@ -543,7 +543,7 @@ _LETTER_VARIANTS = {
 }
 # Сочетания, у которых своё написание: «ий» — Dmitriy/Dmitry/Dmitri, «кс» — Alexander/Aleksandr, «ей» — Sergey/Sergei.
 _COMBOS = {
-    "ий": ("iy", "y", "i", "ii", "ij"), "ый": ("y", "yi", "iy", "ii", "yj"), "ей": ("ey", "ei", "ej", "y"),
+    "ий": ("iy", "y", "i", "ii", "ij"), "ый": ("y", "yi", "iy", "ii", "yj", "yy"), "ей": ("ey", "ei", "ej", "y"),
     "ай": ("ay", "ai", "aj"), "ой": ("oy", "oi", "oj", "y"), "уй": ("uy", "ui"), "ия": ("ia", "iya", "iia", "ija"),
     "ье": ("ye", "ie", "je"), "ья": ("ya", "ia", "ja"), "кс": ("ks", "x"), "ьи": ("yi", "ii"),
 }
@@ -566,6 +566,21 @@ def transliterate(word: str) -> set[str]:
     """Латинские написания русского слова: перебор вариантов букв и сочетаний, не больше `MAX_TRANSLIT_VARIANTS`."""
     if not word:
         return set()
+    return set(_transliterate(word))
+
+
+# Написания, которые перебор по буквам не даёт: «Евгений» — Eugeniy, «Наталия» — Natalya, «Александр» — Aleksander,
+# «Андреев» — Andreyev. Добавляются поверх основных, чтобы не вытеснять их из лимита.
+_VARIANT_RULES = (
+    (re.compile(r"^ev"), "eu"),
+    (re.compile(r"i[iy]?a$"), "ya"),
+    (re.compile(r"(?<=[bdfgkpstvz])r$"), "er"),
+    (re.compile(r"(?<=[aeiou])e"), "ye"),
+)
+
+
+@lru_cache(maxsize=65536)
+def _transliterate(word: str) -> frozenset[str]:
     low = word.lower()
     partial: list[str] = [""]
     i = 0
@@ -585,7 +600,9 @@ def transliterate(word: str) -> set[str]:
     kept = list(dict.fromkeys(ordered))[:MAX_TRANSLIT_VARIANTS]
     extra = {base.replace("iya", "ia").replace("yy", "y"), base.replace("kh", "h").replace("ts", "c"),
              *_ENGLISH_EQUIVALENTS.get(low, ())}
-    return {v.title() for v in [*kept, *extra] if len(v) >= 2}
+    for pattern, replacement in _VARIANT_RULES:
+        extra.update(pattern.sub(replacement, v) for v in kept if pattern.search(v))
+    return frozenset(v.title() for v in [*kept, *extra] if len(v) >= 2)
 
 
 def split_full_name(parts: list[str]) -> tuple[str, str, str]:

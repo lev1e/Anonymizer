@@ -1,5 +1,5 @@
 #define MyAppName "Anonymizer"
-#define MyAppVersion "2.0.0"
+#define MyAppVersion "2.1.0"
 #define MyAppExeName "Anonymizer.exe"
 #define WebView2Setup "MicrosoftEdgeWebview2Setup.exe"
 
@@ -11,7 +11,7 @@ DefaultDirName={localappdata}\Programs\Anonymizer
 DefaultGroupName=Anonymizer
 PrivilegesRequired=lowest
 OutputDir=..\dist
-OutputBaseFilename=Anonymizer-Setup-2.0.0
+OutputBaseFilename=Anonymizer-Setup-2.1.0
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

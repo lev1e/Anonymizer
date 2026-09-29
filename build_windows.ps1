@@ -34,7 +34,7 @@ if (-not (Test-Path $bootstrapper)) {
 $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
 if (Test-Path $iscc) {
   & $iscc packaging\Anonymizer.iss
-  Write-Host "Installer: dist\Anonymizer-Setup-2.0.0.exe"
+  Write-Host "Installer: dist\Anonymizer-Setup-2.1.0.exe"
 } else {
   Write-Host "Inno Setup 6 не найден. Portable build готов: dist\Anonymizer.exe"
 }

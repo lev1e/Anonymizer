@@ -17,6 +17,7 @@ Name и Patr на всех падежных формах и, что не мен�
 
 from __future__ import annotations
 
+import re
 import threading
 from functools import lru_cache
 from typing import NamedTuple
@@ -276,3 +277,62 @@ def is_common_word(word: str) -> bool:
     if any(_PROPER_TAGS & set(p.tag.grammemes) for p in dictionary):
         return False
     return any(p.tag.POS in LEXICAL_POS for p in dictionary)
+
+
+@lru_cache(maxsize=8192)
+def is_adjective(word: str) -> bool:
+    """Полное прилагательное: «Дальневосточный», «Заречинский». Названия филиалов часто им и бывают.
+
+    Разбор берётся любой, не только словарный: редкое прилагательное от названия места словарь достраивает по образцу.
+    """
+    morph = analyzer()
+    if morph is None or not word:
+        return False
+    try:
+        return any(p.tag.POS == "ADJF" and "nomn" in p.tag.grammemes for p in morph.parse(word))
+    except Exception:
+        return False
+
+
+# Прилагательное от названия места: «Кузбасский», «Сибирский», «Иркутская»; стороны света и крупные части страны —
+# «Дальневосточный», «Северо-Западный», «Центральный». «Основной», «Текущий», «Общий» сюда не попадают.
+_GEO_ADJECTIVE = re.compile(r"(?:ск|цк)(?:ий|ая|ое|ие)$|(?:восточн|западн|северн|южн|центральн)[а-яё]*$")
+
+
+def is_geo_adjective(word: str) -> bool:
+    """Прилагательное, которым называют место или филиал, а не обычное описательное слово."""
+    low = word.lower().replace("ё", "е")
+    return is_adjective(word) and (bool(_GEO_ADJECTIVE.search(low)) or not is_common_word(word))
+
+
+# Части речи, которыми не называют места: «Выполняется», «Частично», «Согласовано», «Три», «Или».
+STATUS_POS = frozenset({"VERB", "INFN", "PRTF", "PRTS", "GRND", "ADVB", "NUMR", "PRCL", "CONJ", "PREP", "PRED", "INTJ"})
+
+
+@lru_cache(maxsize=8192)
+def is_toponym(word: str) -> bool:
+    """Словарь знает слово как географическое название: «Астана», «Москва», «Сахалин»."""
+    morph = analyzer()
+    if morph is None or not word:
+        return False
+    try:
+        return any("Geox" in p.tag.grammemes and _is_dictionary(p) for p in morph.parse(word))
+    except Exception:
+        return False
+
+
+@lru_cache(maxsize=8192)
+def is_status_word(word: str) -> bool:
+    """Слово статуса или действия, а не название: главный разбор или словарный разбор — глагольная или служебная форма."""
+    morph = analyzer()
+    if morph is None or not word:
+        return False
+    try:
+        parses = morph.parse(word)
+    except Exception:
+        return False
+    if not parses:
+        return False
+    if any("Geox" in p.tag.grammemes and _is_dictionary(p) for p in parses):
+        return False
+    return parses[0].tag.POS in STATUS_POS or any(p.tag.POS in STATUS_POS and _is_dictionary(p) for p in parses)
