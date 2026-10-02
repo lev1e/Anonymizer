@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+           xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
+           xsi:type="TaskPaneApp">
+  <Id>{ADDIN_ID}</Id>
+  <Version>{VERSION}.0</Version>
+  <ProviderName>Anonymizer</ProviderName>
+  <DefaultLocale>ru-RU</DefaultLocale>
+  <DisplayName DefaultValue="Anonymizer"/>
+  <Description DefaultValue="Обезличивает открытый документ на этом компьютере и возвращает исходные данные. Файлы не покидают компьютер."/>
+  <IconUrl DefaultValue="{BASE}/addin/icon-64.png"/>
+  <HighResolutionIconUrl DefaultValue="{BASE}/addin/icon-128.png"/>
+  <SupportUrl DefaultValue="{BASE}/addin/taskpane.html"/>
+  <AppDomains>
+    <AppDomain>{BASE}</AppDomain>
+  </AppDomains>
+  <Hosts>
+    <Host Name="Document"/>
+    <Host Name="Workbook"/>
+    <Host Name="Presentation"/>
+  </Hosts>
+{REQUIREMENTS}  <DefaultSettings>
+    <SourceLocation DefaultValue="{BASE}/addin/taskpane.html"/>
+  </DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
+    <Hosts>
+{HOST_BLOCKS}
+    </Hosts>
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Icon.16" DefaultValue="{BASE}/addin/icon-16.png"/>
+        <bt:Image id="Icon.32" DefaultValue="{BASE}/addin/icon-32.png"/>
+        <bt:Image id="Icon.80" DefaultValue="{BASE}/addin/icon-80.png"/>
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="Pane.Url" DefaultValue="{BASE}/addin/taskpane.html"/>
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="Group.Label" DefaultValue="Anonymizer"/>
+        <bt:String id="Button.Label" DefaultValue="Панель"/>
+        <bt:String id="Anonymize.Label" DefaultValue="Обезличить"/>
+        <bt:String id="Restore.Label" DefaultValue="Вернуть данные"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="Button.Tip" DefaultValue="Панель Anonymizer: настройки, копии документов, отчёт."/>
+        <bt:String id="Anonymize.Tip" DefaultValue="Обезличить открытый документ. Всё выполняется на этом компьютере."/>
+        <bt:String id="Restore.Tip" DefaultValue="Вернуть исходные данные вместо меток в открытом документе."/>
+      </bt:LongStrings>
+    </Resources>
+  </VersionOverrides>
+</OfficeApp>

@@ -1,0 +1,66 @@
+      <Host xsi:type="{HOST_TYPE}">
+        <Runtimes>
+          <Runtime resid="Pane.Url" lifetime="long"/>
+        </Runtimes>
+        <DesktopFormFactor>
+          <FunctionFile resid="Pane.Url"/>
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <OfficeTab id="TabHome">
+              <Group id="Anonymizer.Group">
+                <Label resid="Group.Label"/>
+                <Icon>
+                  <bt:Image size="16" resid="Icon.16"/>
+                  <bt:Image size="32" resid="Icon.32"/>
+                  <bt:Image size="80" resid="Icon.80"/>
+                </Icon>
+                <Control xsi:type="Button" id="Anonymizer.Anonymize">
+                  <Label resid="Anonymize.Label"/>
+                  <Supertip>
+                    <Title resid="Anonymize.Label"/>
+                    <Description resid="Anonymize.Tip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
+                  <Action xsi:type="ExecuteFunction">
+                    <FunctionName>anonymizeCommand</FunctionName>
+                  </Action>
+                </Control>
+                <Control xsi:type="Button" id="Anonymizer.Restore">
+                  <Label resid="Restore.Label"/>
+                  <Supertip>
+                    <Title resid="Restore.Label"/>
+                    <Description resid="Restore.Tip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
+                  <Action xsi:type="ExecuteFunction">
+                    <FunctionName>restoreCommand</FunctionName>
+                  </Action>
+                </Control>
+                <Control xsi:type="Button" id="Anonymizer.Open">
+                  <Label resid="Button.Label"/>
+                  <Supertip>
+                    <Title resid="Button.Label"/>
+                    <Description resid="Button.Tip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>AnonymizerPane</TaskpaneId>
+                    <SourceLocation resid="Pane.Url"/>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>

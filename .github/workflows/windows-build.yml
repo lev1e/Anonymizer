@@ -1,0 +1,54 @@
+name: Windows build
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements-build.txt
+      - run: python tools/fetch_office_js.py
+      - run: python run_tests.py
+      - run: pyinstaller --noconfirm --clean Anonymizer.spec
+      - name: Self-check of the built program
+        shell: powershell
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "selfcheck.json"
+          $check = Start-Process -FilePath ".\dist\Anonymizer.exe" -ArgumentList "--selfcheck", "`"$report`"" -Wait -PassThru
+          if (Test-Path $report) { Get-Content $report -Raw | Write-Host }
+          if ($check.ExitCode -ne 0) { throw "Self-check failed with code $($check.ExitCode)" }
+      - name: Fetch the WebView2 bootstrapper for the installer
+        shell: powershell
+        run: Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile packaging\MicrosoftEdgeWebview2Setup.exe
+      - name: Build installer
+        shell: powershell
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+          & $iscc packaging\Anonymizer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Anonymizer-Windows
+          path: |
+            dist/Anonymizer.exe
+            dist/Anonymizer-Setup-2.2.0.exe
+          if-no-files-found: error
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/Anonymizer.exe dist/Anonymizer-Setup-2.2.0.exe \
+            --title "Anonymizer ${GITHUB_REF_NAME}" \
+            --notes "Готовые файлы для Windows 10/11 x64. Anonymizer.exe запускается без установки; Anonymizer-Setup-2.2.0.exe устанавливает программу с ярлыком. Python не нужен."

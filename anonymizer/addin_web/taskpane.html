@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="addin-token" content="__ADDIN_TOKEN__">
+<title>Anonymizer</title>
+<link rel="stylesheet" href="taskpane.css">
+<script src="vendor/office.js"></script>
+</head>
+<body>
+<main class="pane">
+  <header class="head">
+    <h1 class="brand"><img class="mark" src="icon-32.png" alt="" width="22" height="22">Anonymizer</h1>
+    <span class="conn" id="conn" role="status">Проверка связи</span>
+  </header>
+
+  <section id="offline" class="block" hidden>
+    <p class="lead">Нет связи с программой Anonymizer.</p>
+    <p class="hint">Запустите программу на этом компьютере. Документ не изменён.</p>
+    <div class="row"><button class="btn" id="retry">Проверить снова</button></div>
+  </section>
+
+  <section id="ready" hidden>
+    <p class="lead" id="lead">Документ обезличивается прямо здесь, а потом возвращается к исходным данным.</p>
+    <div class="actions">
+      <button class="btn main" id="go-anon">Обезличить документ</button>
+      <button class="btn" id="go-rest">Вернуть данные</button>
+    </div>
+    <p class="hint" id="notice" hidden></p>
+  </section>
+
+  <section id="busy" class="block" hidden aria-live="polite">
+    <ol class="steps" id="steps"></ol>
+    <div class="bar"><i id="bar"></i></div>
+  </section>
+
+  <section id="result" class="block" hidden aria-live="polite"></section>
+
+  <details id="more" hidden>
+    <summary>Дополнительно</summary>
+    <div class="fold">
+      <label class="check"><input type="checkbox" id="opt-auto"><span>Заменять сразу, если нет сомнительных мест<br><span class="hint">Иначе перед заменой показывается список для проверки.</span></span></label>
+      <label class="check"><input type="checkbox" id="opt-numbers"><span>Заменять числа в Excel<br><span class="hint">Даты и годы не меняются.</span></span></label>
+      <label class="check"><input type="checkbox" id="opt-strict"><span>Скрывать и сомнительные слова</span></label>
+      <label class="check"><input type="checkbox" id="opt-countries"><span>Скрывать страны</span></label>
+      <div>
+        <h2 class="sec">Копии документов до замены</h2>
+        <p class="hint">Хранятся зашифрованными на этом компьютере 7 дней. Вернуть можно документ того же типа.</p>
+        <ul class="list" id="backups"></ul>
+      </div>
+      <div class="row"><button class="link" id="open-folder">Обработать целую папку в программе</button></div>
+    </div>
+  </details>
+  <p class="foot">Файлы и соответствия не покидают этот компьютер.</p>
+</main>
+<script src="taskpane.js"></script>
+</body>
+</html>

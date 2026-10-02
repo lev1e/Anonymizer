@@ -1,0 +1,712 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Anonymizer</title>
+<style>
+:root {
+  --bg: #faf9f5; --surface: #ffffff; --text: #141413; --muted: #66645c;
+  --line: #e3e0d5; --line-strong: #c9c6ba; --accent: #b9573a; --accent-hover: #a94a30; --focus: #c96442;
+  --on-accent: #ffffff; --error: #a3352b;
+  --r-control: 8px; --r-block: 12px;
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
+  --sans: "Segoe UI Variable Text", "Segoe UI", -apple-system, system-ui, "Helvetica Neue", Arial, sans-serif;
+  --serif: ui-serif, "Iowan Old Style", Georgia, Cambria, "Times New Roman", serif;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1f1e1c; --surface: #2a2926; --text: #f0eee6; --muted: #a8a59b;
+    --line: #3b3935; --line-strong: #56534c; --focus: #d97757; --error: #ef8a7c;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1f1e1c; --surface: #2a2926; --text: #f0eee6; --muted: #a8a59b;
+  --line: #3b3935; --line-strong: #56534c; --focus: #d97757; --error: #ef8a7c;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--text); font: 15px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+button, input, textarea, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+[hidden] { display: none !important; }
+
+.page { max-width: 680px; margin: 0 auto; padding: var(--s5) var(--s4) var(--s6); }
+.top { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s4); }
+.brand { font: 500 24px/1.2 var(--serif); margin: 0; letter-spacing: -.01em; }
+.tabs { display: flex; gap: var(--s5); margin: var(--s4) 0 var(--s5); border-bottom: 1px solid var(--line); }
+.tab { background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: var(--s2) 0; color: var(--muted); border-radius: 0; }
+.tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--text); font-weight: 600; }
+.tab:hover { color: var(--text); }
+.link { background: none; border: 0; padding: 0; color: var(--muted); text-decoration: underline; text-underline-offset: 3px; border-radius: 4px; }
+.link:hover { color: var(--text); }
+.lead { margin: 0 0 var(--s4); color: var(--muted); }
+
+.drop { border: 1px solid var(--line-strong); border-radius: var(--r-block); background: var(--surface); padding: var(--s6) var(--s4); text-align: center; cursor: pointer; }
+.drop.over { border-color: var(--text); background: var(--bg); }
+.drop-title { margin: 0 0 var(--s3); font-weight: 600; }
+.drop-note { margin: var(--s3) 0 0; color: var(--muted); font-size: 13px; }
+
+.btn { display: inline-block; min-height: 40px; padding: var(--s2) var(--s4); border-radius: var(--r-control); border: 1px solid var(--line-strong); background: var(--surface); color: var(--text); text-decoration: none; text-align: center; line-height: 22px; }
+.btn:hover:not(:disabled) { border-color: var(--text); }
+.btn:disabled { color: var(--muted); border-color: var(--line); cursor: not-allowed; }
+.btn.main { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; padding: var(--s2) var(--s5); }
+.btn.main:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn.main:disabled { background: var(--line); border-color: var(--line); color: var(--muted); }
+
+.files { list-style: none; margin: var(--s4) 0 0; padding: 0; border-top: 1px solid var(--line); }
+.file { display: flex; align-items: baseline; gap: var(--s4); padding: var(--s3) 0; border-bottom: 1px solid var(--line); }
+.file .body { flex: 1; min-width: 0; }
+.name { overflow-wrap: anywhere; font-weight: 600; }
+.meta { color: var(--muted); font-size: 13px; }
+.meta.error, .error { color: var(--error); }
+
+.row { display: flex; align-items: center; gap: var(--s4); flex-wrap: wrap; margin-top: var(--s4); }
+.hint { color: var(--muted); font-size: 13px; }
+
+details { margin-top: var(--s4); }
+summary { cursor: pointer; color: var(--muted); border-radius: 4px; }
+summary:hover { color: var(--text); }
+details[open] > summary { margin-bottom: var(--s3); color: var(--text); }
+.fold { display: grid; gap: var(--s3); }
+.fold h4, .field h4 { margin: 0 0 var(--s1); font-size: 14px; font-weight: 600; }
+textarea, input[type=text], input[type=password], select { width: 100%; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-control); padding: var(--s2) var(--s3); }
+textarea { min-height: 76px; resize: vertical; }
+label.check { display: flex; gap: var(--s2); align-items: flex-start; }
+input[type=checkbox] { margin-top: 4px; accent-color: var(--accent); }
+
+.progress { margin-top: var(--s5); }
+.bar { height: 2px; background: var(--line); margin-top: var(--s2); }
+.bar > i { display: block; height: 100%; width: 0; background: var(--text); }
+
+.result { margin-top: var(--s5); }
+.status { margin: 0; font: 500 20px/1.3 var(--serif); }
+.status.error { color: var(--error); }
+.sub { margin: var(--s1) 0 0; color: var(--muted); }
+.outs { list-style: none; margin: var(--s4) 0 0; padding: 0; border-top: 1px solid var(--line); }
+.out { padding: var(--s3) 0; border-bottom: 1px solid var(--line); }
+.out-head { display: flex; align-items: center; gap: var(--s4); }
+.out-head .body { flex: 1; min-width: 0; }
+.saved { margin-top: var(--s2); font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.msgs { list-style: none; margin: var(--s2) 0 0; padding: 0; display: grid; gap: var(--s1); }
+.msgs li { font-size: 13px; padding-left: var(--s3); border-left: 2px solid var(--line-strong); }
+.msgs li.error { color: var(--error); border-left-color: var(--error); }
+.msgs li.info { color: var(--muted); }
+
+.sug { display: grid; gap: var(--s2); }
+.sug label { display: grid; grid-template-columns: 20px 1fr; gap: var(--s2); align-items: start; padding: var(--s2) var(--s3); border: 1px solid var(--line); border-radius: var(--r-control); background: var(--surface); }
+.ctx { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.scroll { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: var(--r-control); background: var(--surface); }
+table.map { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.map th { text-align: left; color: var(--muted); font-weight: 600; padding: var(--s1) var(--s2); border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--surface); }
+table.map td { padding: var(--s1) var(--s2); border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+table.map td.tok { font-family: var(--mono); white-space: nowrap; }
+.notice { margin: 0 0 var(--s4); padding-left: var(--s3); border-left: 2px solid var(--line-strong); color: var(--muted); font-size: 13px; }
+
+dialog { border: 1px solid var(--line-strong); border-radius: var(--r-block); padding: 0; width: min(520px, calc(100vw - 24px)); background: var(--bg); color: var(--text); }
+dialog::backdrop { background: rgba(20, 20, 19, .5); }
+.dlg { padding: var(--s5); display: grid; gap: var(--s4); max-height: 88vh; overflow: auto; }
+.dlg h2 { margin: 0; font: 500 20px/1.3 var(--serif); }
+.dlg .actions { display: flex; gap: var(--s3); justify-content: flex-end; flex-wrap: wrap; }
+.toast { position: fixed; left: 50%; bottom: var(--s5); transform: translateX(-50%); background: var(--text); color: var(--bg); padding: var(--s2) var(--s4); border-radius: var(--r-control); font-size: 13px; z-index: 30; }
+@media (max-width: 560px) {
+  .page { padding: var(--s4) var(--s3) var(--s5); }
+  .out-head { flex-wrap: wrap; }
+  .drop { padding: var(--s5) var(--s3); }
+}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="top">
+    <h1 class="brand">Anonymizer</h1>
+    <button class="link" id="open-settings">Настройки</button>
+  </div>
+  <div class="tabs" role="tablist" aria-label="Режим">
+    <button class="tab" role="tab" id="tab-anon" aria-selected="true" aria-controls="view-anon">Обезличить</button>
+    <button class="tab" role="tab" id="tab-rest" aria-selected="false" aria-controls="view-rest" tabindex="-1">Восстановить</button>
+  </div>
+  <p class="notice" id="notice" hidden></p>
+
+  <section id="view-anon" role="tabpanel" aria-labelledby="tab-anon">
+    <p class="lead">Имена, компании, города и контакты заменяются метками. Файл остаётся на этом компьютере.</p>
+    <div class="drop" id="drop-anon">
+      <p class="drop-title">Перетащите файл сюда</p>
+      <div class="row" style="margin:0;justify-content:center"><button class="btn" id="pick-anon">Выбрать файл</button><button class="btn" id="pick-folder-anon" hidden>Выбрать папку</button></div>
+      <p class="drop-note">Excel, Word, PowerPoint, PDF, текст. Папка обрабатывается целиком, вместе с подпапками.</p>
+    </div>
+    <ul class="files" id="files-anon"></ul>
+    <details>
+      <summary>Дополнительно</summary>
+      <div class="fold">
+        <div class="field">
+          <h4>Скрыть ещё эти слова</h4>
+          <textarea id="hide-once" aria-label="Скрыть ещё эти слова" placeholder="По одному в строке"></textarea>
+          <div class="hint">Только для этого запуска. Постоянный список: Настройки.</div>
+        </div>
+        <label class="check"><input type="checkbox" id="opt-numbers"><span>Заменять числа в Excel. Даты и годы не меняются, результаты формул очищаются.</span></label>
+        <label class="check"><input type="checkbox" id="opt-strict"><span>Скрывать и сомнительные слова<br><span class="hint">Всё из списка «Возможно, нужно скрыть ещё». Может скрыть и обычные термины.</span></span></label>
+        <label class="check"><input type="checkbox" id="opt-countries"><span>Скрывать страны<br><span class="hint">Китай, Армения, ОАЭ и слова от них: «китайский», «в Армении».</span></span></label>
+        <label class="check"><input type="checkbox" id="opt-names"><span>Заменять названия файлов нейтральными<br><span class="hint">Файл1, Файл2… При возврате файл снова получит исходное название.</span></span></label>
+      </div>
+    </details>
+    <div class="row"><button class="btn main" id="btn-anon" disabled>Обезличить</button></div>
+    <div class="progress" id="progress-anon" hidden aria-live="polite"><div id="stage-anon"></div><div class="bar"><i id="bar-anon"></i></div></div>
+    <div id="result-anon" aria-live="polite"></div>
+  </section>
+
+  <section id="view-rest" role="tabpanel" aria-labelledby="tab-rest" hidden>
+    <p class="lead">Файл, который вернул ИИ. Метки заменяются исходными значениями, ключ выбирать не нужно.</p>
+    <div class="drop" id="drop-rest">
+      <p class="drop-title">Перетащите файл сюда</p>
+      <div class="row" style="margin:0;justify-content:center"><button class="btn" id="pick-rest">Выбрать файл</button><button class="btn" id="pick-folder-rest" hidden>Выбрать папку</button></div>
+      <p class="drop-note">Файл с метками Name1, Company1 и подобными. Можно выбрать целую папку обезличенных файлов.</p>
+    </div>
+    <ul class="files" id="files-rest"></ul>
+    <div class="row"><button class="btn main" id="btn-rest" disabled>Восстановить</button></div>
+    <div class="progress" id="progress-rest" hidden aria-live="polite"><div id="stage-rest"></div><div class="bar"><i id="bar-rest"></i></div></div>
+    <div id="result-rest" aria-live="polite"></div>
+  </section>
+  <input type="file" id="input-file" multiple hidden>
+  <input type="file" id="input-import" hidden>
+</div>
+
+<dialog id="settings">
+  <div class="dlg">
+    <h2>Настройки</h2>
+    <div class="field"><h4>Всегда скрывать</h4>
+      <textarea id="pref-hide" aria-label="Всегда скрывать" placeholder="По одному в строке: проекты, клиенты, внутренние названия"></textarea></div>
+    <div class="field"><h4>Никогда не скрывать</h4>
+      <textarea id="pref-keep" aria-label="Никогда не скрывать" placeholder="По одному в строке: слова, ошибочно принятые за имена"></textarea></div>
+    <label class="check"><input type="checkbox" id="pref-numbers"><span>Заменять числа в Excel по умолчанию</span></label>
+    <label class="check"><input type="checkbox" id="pref-strict"><span>Скрывать и сомнительные слова по умолчанию</span></label>
+    <label class="check"><input type="checkbox" id="pref-countries"><span>Скрывать страны по умолчанию</span></label>
+    <label class="check"><input type="checkbox" id="pref-names"><span>Заменять названия файлов нейтральными по умолчанию</span></label>
+    <div class="field"><h4>Хранение соответствий</h4>
+      <select id="pref-retention" aria-label="Срок хранения соответствий">
+        <option value="30">30 дней</option><option value="90">90 дней</option><option value="180">180 дней</option>
+        <option value="365">1 год</option><option value="0">Пока не очищу</option>
+      </select>
+      <div class="hint" id="vault-stats"></div>
+      <div class="hint">Без соответствий обезличенные файлы не восстановить.</div>
+    </div>
+    <div class="row" style="margin:0">
+      <button class="btn" id="btn-backup">Сохранить копию…</button>
+      <button class="btn" id="btn-import">Загрузить копию…</button>
+      <button class="btn" id="btn-clear">Очистить хранилище</button>
+    </div>
+    <div class="field"><h4>Word, Excel, PowerPoint</h4>
+      <div class="hint" id="addin-status">Проверка…</div>
+      <div class="row" style="margin-top:var(--s2)">
+        <button class="btn" id="btn-addin-install">Подключить</button>
+        <button class="btn" id="btn-addin-remove" hidden>Отключить</button>
+      </div>
+      <div class="hint" id="addin-result"></div>
+      <div class="hint">В Office появится кнопка Anonymizer: она обезличивает открытый документ на месте и возвращает данные обратно.</div>
+    </div>
+    <div class="hint">Файлы и соответствия не покидают этот компьютер.</div>
+    <div class="actions"><button class="btn" id="btn-quit" hidden>Выйти из программы</button><button class="btn main" id="btn-save-settings">Готово</button></div>
+  </div>
+</dialog>
+
+<dialog id="ask">
+  <form method="dialog" class="dlg" id="ask-form">
+    <h2 id="ask-title"></h2>
+    <p id="ask-text" class="sub" style="margin:0"></p>
+    <input type="password" id="ask-input" aria-label="Пароль" autocomplete="off" hidden>
+    <div class="error" id="ask-error" hidden></div>
+    <div class="actions"><button class="btn" value="cancel" id="ask-cancel">Отмена</button><button class="btn main" value="ok" id="ask-ok">Продолжить</button></div>
+  </form>
+</dialog>
+
+<script>
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const HEADERS = {"X-Requested-With": "anonymizer"};
+const GROUP_ORDER = ["names","companies","projects","places","contacts","files","documents","finance","secrets","custom"];
+let STATE = null;
+let current = "anon";
+const modes = {anon: {files: [], folder: null, job: null, lastOptions: {}, saved: {}}, rest: {files: [], folder: null, job: null, saved: {}}};
+
+/* ---------- утилиты ---------- */
+function esc(v) { const d = document.createElement("div"); d.textContent = v == null ? "" : String(v); return d.innerHTML; }
+function fmtSize(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + " МБ" : Math.max(1, Math.round(n / 1024)) + " КБ"; }
+function toast(text) { const t = document.createElement("div"); t.className = "toast"; t.textContent = text; document.body.appendChild(t); setTimeout(() => t.remove(), 3000); }
+const lines = v => v.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+async function api(path, opts = {}) {
+  const r = await fetch(path, {credentials: "same-origin", ...opts, headers: {...HEADERS, ...(opts.headers || {})}});
+  const type = r.headers.get("Content-Type") || "";
+  if (!type.includes("json")) { if (!r.ok) throw new Error("Ошибка " + r.status + ". Повторите действие."); return r; }
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || "Ошибка " + r.status + ". Повторите действие.");
+  return data;
+}
+const post = (path, body) => api(path, {method: "POST", body: JSON.stringify(body), headers: {"Content-Type": "application/json"}});
+
+/* Окно программы даёт мост к системным диалогам; в обычном браузере (разработка) работают запасные пути. */
+function nativeReady() {
+  if (!window.pywebview) return Promise.resolve(null);
+  if (window.pywebview.api && window.pywebview.api.pick_files) return Promise.resolve(window.pywebview.api);
+  return new Promise(resolve => {
+    const done = () => resolve(window.pywebview.api && window.pywebview.api.pick_files ? window.pywebview.api : null);
+    window.addEventListener("pywebviewready", done, {once: true});
+    setTimeout(done, 4000);
+  }).then(bridge => { if (!bridge) throw new Error("Системные окна недоступны. Перезапустите программу."); return bridge; });
+}
+
+/* ---------- ask: свои диалоги вместо системных confirm и prompt ---------- */
+function ask({title, text, password = false, ok = "Продолжить", validate}) {
+  return new Promise(resolve => {
+    const dlg = $("#ask"), input = $("#ask-input"), err = $("#ask-error");
+    $("#ask-title").textContent = title; $("#ask-text").textContent = text || "";
+    input.hidden = !password; input.value = ""; err.hidden = true; $("#ask-ok").textContent = ok;
+    const finish = value => { dlg.close(); resolve(value); };
+    $("#ask-form").onsubmit = ev => {
+      ev.preventDefault();
+      const value = password ? input.value : true;
+      const problem = validate ? validate(value) : "";
+      if (problem) { err.textContent = problem; err.hidden = false; return; }
+      finish(value);
+    };
+    $("#ask-cancel").onclick = ev => { ev.preventDefault(); finish(null); };
+    dlg.oncancel = () => resolve(null);
+    dlg.showModal();
+    (password ? input : $("#ask-ok")).focus();
+  });
+}
+
+/* ---------- вкладки ---------- */
+function showTab(name) {
+  current = name;
+  for (const k of ["anon", "rest"]) {
+    $("#view-" + k).hidden = k !== name;
+    const tab = $("#tab-" + k);
+    tab.setAttribute("aria-selected", String(k === name)); tab.tabIndex = k === name ? 0 : -1;
+  }
+}
+$("#tab-anon").onclick = () => showTab("anon");
+$("#tab-rest").onclick = () => showTab("rest");
+for (const tab of document.querySelectorAll(".tab")) tab.addEventListener("keydown", e => {
+  if (e.key === "ArrowRight" || e.key === "ArrowLeft") { const next = current === "anon" ? "rest" : "anon"; showTab(next); $("#tab-" + next).focus(); }
+});
+
+/* ---------- файлы ---------- */
+function addEntry(mode, entry) { modes[mode].folder = null; modes[mode].files.push(entry); renderFiles(mode); }
+async function pickFolder(mode) {
+  let bridge;
+  try { bridge = await nativeReady(); } catch (e) { modes[mode].pickError = e.message; return renderFiles(mode); }
+  if (!bridge || !bridge.pick_folder) return;
+  const r = await bridge.pick_folder(mode === "rest" ? "restore" : "anonymize");
+  if (r.cancelled) return;
+  if (r.error) { modes[mode].pickError = r.error; return renderFiles(mode); }
+  modes[mode].pickError = ""; modes[mode].files = []; modes[mode].folder = r.folder; renderFiles(mode);
+}
+$("#pick-folder-anon").addEventListener("click", ev => ev.stopPropagation() || pickFolder("anon"));
+$("#pick-folder-rest").addEventListener("click", ev => ev.stopPropagation() || pickFolder("rest"));
+nativeReady().then(bridge => { if (bridge && bridge.pick_folder) document.querySelectorAll("[id^=pick-folder-]").forEach(b => b.hidden = false); }).catch(() => {});
+async function addFiles(mode, list) {
+  for (const file of list) {
+    const entry = {name: file.name, size: file.size, state: "uploading", info: null, id: null};
+    addEntry(mode, entry);
+    try {
+      const info = await api("/api/upload", {method: "POST", body: file, headers: {"X-Filename": encodeURIComponent(file.name), "Content-Type": "application/octet-stream"}});
+      entry.info = info; entry.id = info.id; entry.state = "ready";
+    } catch (e) { entry.state = "failed"; entry.error = e.message; }
+    renderFiles(mode);
+  }
+}
+async function pick(mode) {
+  let bridge;
+  try { bridge = await nativeReady(); } catch (e) { modes[mode].pickError = e.message; return renderFiles(mode); }
+  if (!bridge) { $("#input-file").dataset.mode = mode; $("#input-file").click(); return; }
+  const r = await bridge.pick_files();
+  if (r.error) { modes[mode].pickError = r.error; return renderFiles(mode); }
+  modes[mode].pickError = "";
+  for (const f of r.files || []) {
+    if (f.error) addEntry(mode, {name: f.name, state: "failed", error: f.error});
+    else addEntry(mode, {name: f.name, size: f.info.size, state: "ready", info: f.info, id: f.info.id});
+  }
+}
+$("#input-file").addEventListener("change", ev => { addFiles(ev.target.dataset.mode, [...ev.target.files]); ev.target.value = ""; });
+$("#drop-anon").addEventListener("click", () => pick("anon"));
+$("#drop-rest").addEventListener("click", () => pick("rest"));
+$("#pick-anon").addEventListener("click", ev => ev.stopPropagation() || pick("anon"));
+$("#pick-rest").addEventListener("click", ev => ev.stopPropagation() || pick("rest"));
+
+/* Перетаскивание работает по всему окну: файл, брошенный мимо зоны, не должен открываться как документ. */
+let dragDepth = 0;
+const zone = () => $("#drop-" + current);
+window.addEventListener("dragenter", e => { e.preventDefault(); dragDepth++; zone().classList.add("over"); });
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("dragleave", e => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) zone().classList.remove("over"); });
+window.addEventListener("drop", e => {
+  e.preventDefault(); dragDepth = 0; document.querySelectorAll(".drop").forEach(z => z.classList.remove("over"));
+  if ($("#settings").open || $("#ask").open) return;
+  const files = e.dataTransfer && [...e.dataTransfer.files];
+  if (files && files.length) addFiles(current, files);
+});
+
+function renderFiles(mode) {
+  const box = $("#files-" + mode); box.innerHTML = "";
+  const items = modes[mode].files;
+  const folder = modes[mode].folder;
+  if (folder) {
+    const li = document.createElement("li"); li.className = "file";
+    const parts = [`Файлов к обработке: ${folder.files}`, fmtSize(folder.bytes)];
+    if (folder.skipped) parts.push(`пропущено: ${folder.skipped} (неподдерживаемый формат)`);
+    li.innerHTML = `<div class="body"><div class="name">Папка: ${esc(folder.name)}</div><div class="meta${folder.files ? "" : " error"}">${esc(parts.join(" · "))}${folder.note ? `<br>${esc(folder.note)}` : ""}${folder.files ? "" : "<br>В папке нет файлов, которые можно обработать."}</div></div><button class="link" data-del-folder="1" aria-label="Убрать папку">Убрать</button>`;
+    box.appendChild(li);
+  }
+  items.forEach((f, i) => {
+    const li = document.createElement("li"); li.className = "file";
+    const bad = f.state === "failed" || (f.info && !f.info.supported);
+    let note = "", cls = "meta";
+    if (f.state === "uploading") note = "Проверяется";
+    else if (f.state === "failed") { note = f.error; cls += " error"; }
+    else if (!f.info.supported) { note = f.info.note; cls += " error"; }
+    else {
+      note = esc(fmtSize(f.info.size));
+      if (mode === "anon" && f.info.tokens > 0) note += ` · В файле уже есть метки (${f.info.tokens}), похоже, он обезличен. <button class="link" data-move="${i}">Восстановить его</button>`;
+      if (mode === "rest" && f.info.tokens === 0) note += " · Меток не найдено: возможно, это не тот файл.";
+    }
+    li.innerHTML = `<div class="body"><div class="name">${esc(f.name)}</div><div class="${cls}">${bad ? esc(note) : note}</div></div><button class="link" data-del="${i}" aria-label="Убрать файл ${esc(f.name)}">Убрать</button>`;
+    box.appendChild(li);
+  });
+  if (modes[mode].pickError) { const li = document.createElement("li"); li.className = "file"; li.innerHTML = `<div class="meta error">${esc(modes[mode].pickError)}</div>`; box.appendChild(li); }
+  box.querySelectorAll("[data-del-folder]").forEach(b => b.onclick = () => { modes[mode].folder = null; renderFiles(mode); });
+  box.querySelectorAll("[data-del]").forEach(b => b.onclick = () => { items.splice(+b.dataset.del, 1); renderFiles(mode); });
+  box.querySelectorAll("[data-move]").forEach(b => b.onclick = () => {
+    const [entry] = items.splice(+b.dataset.move, 1); modes.rest.files.push(entry);
+    renderFiles("anon"); renderFiles("rest"); showTab("rest");
+  });
+  const ready = items.filter(f => f.state === "ready" && f.info.supported).length;
+  const busy = items.some(f => f.state === "uploading");
+  $("#btn-" + mode).disabled = !(ready || (folder && folder.files)) || busy || !!modes[mode].running;
+}
+
+/* ---------- запуск ---------- */
+function errorLine(text) { return `<div class="result"><p class="status error">Не получилось.</p><p class="sub error">${esc(text)}</p></div>`; }
+async function runJob(mode, endpoint, body) {
+  const m = modes[mode]; m.running = true; m.saved = {}; renderFiles(mode);
+  $("#result-" + mode).innerHTML = "";
+  $("#progress-" + mode).hidden = false; $("#bar-" + mode).style.width = "3%"; $("#stage-" + mode).textContent = "Подготовка";
+  try {
+    const {job} = await post(endpoint, body);
+    for (;;) {
+      await new Promise(r => setTimeout(r, 350));
+      const s = await api("/api/jobs/" + job);
+      $("#bar-" + mode).style.width = Math.max(3, Math.round(s.percent * 100)) + "%";
+      if (s.stage) $("#stage-" + mode).textContent = s.stage;
+      if (s.state === "done") { m.job = s; renderResult(mode, s); break; }
+      if (s.state === "failed") { $("#result-" + mode).innerHTML = errorLine(s.error || "Неизвестная ошибка. Повторите или выберите другой файл."); break; }
+    }
+  } catch (e) {
+    $("#result-" + mode).innerHTML = errorLine(e.message);
+  } finally {
+    m.running = false; $("#progress-" + mode).hidden = true; renderFiles(mode);
+    $("#result-" + mode).scrollIntoView({block: "start"});
+  }
+}
+$("#btn-anon").onclick = () => {
+  const folder = modes.anon.folder;
+  const ids = modes.anon.files.filter(f => f.state === "ready" && f.info.supported).map(f => f.id);
+  const options = {hide_terms: lines($("#hide-once").value), numbers: $("#opt-numbers").checked, strict: $("#opt-strict").checked,
+    countries: $("#opt-countries").checked, neutral_names: $("#opt-names").checked};
+  modes.anon.lastOptions = options;
+  if (folder) return runJob("anon", "/api/folder/anonymize", {folder: folder.id, options});
+  runJob("anon", "/api/anonymize", {files: ids, options});
+};
+$("#btn-rest").onclick = () => {
+  const folder = modes.rest.folder;
+  if (folder) return runJob("rest", "/api/folder/restore", {folder: folder.id});
+  const ids = modes.rest.files.filter(f => f.state === "ready" && f.info.supported).map(f => f.id);
+  runJob("rest", "/api/restore", {files: ids});
+};
+
+/* ---------- результат ---------- */
+const LABELS = {names: "имена", companies: "компании", projects: "проекты", places: "места", contacts: "контакты",
+  files: "имена файлов", documents: "номера", finance: "реквизиты", secrets: "секреты", custom: "слова"};
+function countsText(counts) {
+  return GROUP_ORDER.filter(g => counts[g] && LABELS[g]).map(g => `${LABELS[g]}: ${counts[g]}`).join(", ");
+}
+const MODE = {anonymize: "anon", restore: "rest"};
+function fileHtml(job, f, i) {
+  const state = f.status === "error" ? "Не обработан" : f.status === "attention" ? "Готово, есть замечания" : "Готово";
+  const detail = job.kind === "anonymize" ? countsText(f.counts) : (f.total ? `Восстановлено значений: ${f.total}` : "");
+  // Обезличенный файл может называться нейтрально («Файл1»): рядом показывается, из какого файла он сделан.
+  const from = f.out_name && f.name !== f.out_name ? (job.kind === "anonymize" ? `Из файла: ${esc(f.name)}` : `Возвращён из: ${esc(f.name)}`) : "";
+  const meta = [state, detail, from].filter(Boolean).join(" · ");
+  const msgs = f.messages.length ? `<ul class="msgs">${f.messages.map(m => `<li class="${esc(m.level)}">${esc(m.text)}</li>`).join("")}</ul>` : "";
+  const save = f.downloadable && !(job.result && job.result.folder) ? `<button class="btn" data-save="${i}">Сохранить как…</button>` : "";
+  return `<li class="out"><div class="out-head"><div class="body"><div class="name">${esc(f.out_name || f.name)}</div><div class="meta">${esc(meta)}</div></div>${save}</div><div class="saved" id="saved-${MODE[job.kind]}-${i}" hidden></div>${msgs}</li>`;
+}
+function renderResult(mode, job) {
+  const box = $("#result-" + mode);
+  const files = job.files, okFiles = files.filter(f => f.downloadable);
+  const errors = files.filter(f => f.status === "error").length, attention = files.filter(f => f.status === "attention").length;
+  const r = job.result || {};
+  let status = "", cls = "", sub = "";
+  if (job.kind === "anonymize") {
+    const sugg = (r.suggestions || []).filter(x => x.strong).length;
+    const weakLeft = r.weak_total != null ? r.weak_total : (r.suggestions || []).filter(x => !x.strong).length;
+    if (!okFiles.length) { status = "Файл не обезличен."; cls = " error"; sub = "Причина указана ниже."; }
+    else if (errors || attention || sugg) { status = "Файл готов, но его нужно проверить."; sub = "Прочитайте замечания ниже до загрузки в ИИ. Заменено значений: " + (r.total || 0) + "."; }
+    else if (weakLeft) { status = "Готово. Перед загрузкой в ИИ просмотрите менее вероятные слова."; sub = "Заменено значений: " + (r.total || 0) + ". Не просмотрены менее вероятные слова: " + weakLeft + "."; }
+    else { status = "Готово. Файл можно загружать в ИИ."; sub = "Заменено значений: " + (r.total || 0) + "."; }
+  } else {
+    if (!okFiles.length) { status = "Файл не восстановлен."; cls = " error"; sub = "Причина указана ниже."; }
+    else if (errors || attention || Object.keys(r.unknown || {}).length) { status = "Файл восстановлен не полностью."; sub = "Восстановлено значений: " + (r.restored || 0) + ". Проверьте замечания ниже."; }
+    else { status = "Готово. Исходные данные возвращены."; sub = "Восстановлено значений: " + (r.restored || 0) + "."; }
+  }
+  let html = `<div class="result"><p class="status${cls}">${esc(status)}</p><p class="sub">${esc(sub)}</p><ul class="outs">${files.map((f, i) => fileHtml(job, f, i)).join("")}</ul>`;
+  if (r.folder) html += folderHtml(r.folder);
+  else if (okFiles.length > 1) html += `<div class="row"><button class="btn" id="save-all">Сохранить все в папку…</button></div>`;
+  if (job.kind === "anonymize" && okFiles.length) html += anonymizeExtras(job);
+  box.innerHTML = html + "</div>";
+  box.querySelectorAll("[data-save]").forEach(b => b.onclick = () => saveOne(mode, job, +b.dataset.save, b));
+  const all = $("#save-all", box); if (all) all.onclick = () => saveAll(mode, job, all);
+  const reveal = $("#btn-reveal-folder", box);
+  if (reveal) reveal.onclick = async () => { try { const bridge = await nativeReady(); const res = bridge && await bridge.reveal_folder(job.id); if (res && res.error) toast(res.error); } catch (e) { toast(e.message); } };
+  if (job.kind === "anonymize") bindExtras(mode, job);
+}
+function folderHtml(f) {
+  let html = `<div class="saved">Результат записан в папку: ${esc(f.out)} <button class="link" id="btn-reveal-folder">Открыть папку</button></div>`;
+  html += `<p class="sub">Обработано файлов: ${f.written}${f.failed ? `, не обработано: ${f.failed}` : ""}. Исходная папка не изменена.</p>`;
+  if (f.skipped_total) html += `<details><summary>Пропущено файлов: ${f.skipped_total}</summary><ul class="msgs">${f.skipped.map(x => `<li class="info">${esc(x.path)}: ${esc(x.reason)}</li>`).join("")}</ul></details>`;
+  return html;
+}
+
+/* ---------- сохранение ---------- */
+function showSaved(mode, index, path) {
+  const el = $("#saved-" + mode + "-" + index); if (!el) return;
+  el.hidden = false;
+  el.innerHTML = `Сохранено: ${esc(path)} <button class="link" data-reveal="1">Показать в папке</button>`;
+  el.querySelector("[data-reveal]").onclick = async () => { try { const bridge = await nativeReady(); if (bridge) { const r = await bridge.reveal(path); if (r.error) toast(r.error); } } catch (e) { toast(e.message); } };
+}
+function showSaveError(mode, index, text) {
+  const el = $("#saved-" + mode + "-" + index); if (!el) return;
+  el.hidden = false; el.className = "saved error"; el.textContent = text;
+}
+async function saveOne(mode, job, index, button) {
+  let bridge;
+  try { bridge = await nativeReady(); } catch (e) { return showSaveError(mode, index, e.message); }
+  if (!bridge) { const a = document.createElement("a"); a.href = `/api/download/${job.id}/${index}`; a.download = ""; a.click(); return; }
+  button.disabled = true;
+  try {
+    const r = await bridge.save_result(job.id, index);
+    if (r.path) { const el = $("#saved-" + mode + "-" + index); if (el) el.className = "saved"; showSaved(mode, index, r.path); }
+    else if (r.error) showSaveError(mode, index, r.error);
+  } finally { button.disabled = false; }
+}
+async function saveAll(mode, job, button) {
+  let bridge;
+  try { bridge = await nativeReady(); } catch (e) { return toast(e.message); }
+  if (!bridge) { const a = document.createElement("a"); a.href = `/api/download/${job.id}/all`; a.download = ""; a.click(); return; }
+  button.disabled = true;
+  try {
+    const r = await bridge.save_all(job.id);
+    if (r.saved) Object.entries(r.saved).forEach(([index, path]) => showSaved(mode, index, path));
+    else if (r.error) toast(r.error);
+  } finally { button.disabled = false; }
+}
+async function saveTextFile(name, text) {
+  let bridge;
+  try { bridge = await nativeReady(); } catch (e) { return toast(e.message); }
+  if (bridge) { const r = await bridge.save_text(name, text); if (r.error) toast(r.error); else if (r.path) toast("Сохранено: " + r.path); return; }
+  const blob = new Blob(["﻿" + text], {type: "text/csv;charset=utf-8"});
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click(); URL.revokeObjectURL(a.href);
+}
+
+/* ---------- то, что после обезличивания ---------- */
+const AI_HINT = "В файле есть метки вместо реальных данных: Name1, Company1, Project1, City1, Region1, Address1, Phone1, Domain1, File1, email1@example.com и подобные (иногда с суффиксом, например Name1_2). Не изменяй, не переименовывай и не удаляй эти метки, не объединяй разные метки и не подставляй вместо них другие значения. Сохрани структуру и форматирование файла. Метки, которые ты добавляешь сам, называй иначе, например X-1.";
+function anonymizeExtras(job) {
+  const r = job.result || {};
+  const mem = r.remembered || {};
+  let html = "";
+  if ((mem.hide && mem.hide.length) || (mem.keep && mem.keep.length)) {
+    const parts = [];
+    if (mem.hide.length) parts.push("всегда скрывать: " + mem.hide.map(esc).join(", "));
+    if (mem.keep.length) parts.push("никогда не скрывать: " + mem.keep.map(esc).join(", "));
+    html += `<p class="sub">Решения сохранены (${parts.join("; ")}). Список: Настройки.</p>`;
+  }
+  const sugg = r.suggestions || [];
+  const strong = sugg.filter(x => x.strong), weak = sugg.filter(x => !x.strong);
+  const row = s => `<label><input type="checkbox" data-sug="${sugg.indexOf(s)}"><span><b>${esc(s.text)}</b>${s.count > 1 ? " ×" + s.count : ""}<div class="ctx">${esc(s.reason)}. …${esc(s.context.slice(0, 120))}…</div></span></label>`;
+  if (strong.length) {
+    html += `<details open><summary>Возможно, нужно скрыть ещё (${strong.length})</summary><p class="hint" style="margin-top:0">Программа не уверена в этих словах и не заменила их. Отметьте те, что нужно скрыть.</p><div class="sug">` +
+      strong.slice(0, 15).map(row).join("") + `</div>` +
+      (strong.length > 15 ? `<details><summary>Показать остальные (${strong.length - 15})</summary><div class="sug">${strong.slice(15).map(row).join("")}</div></details>` : "") + `</details>`;
+  }
+  const weakTotal = r.weak_total != null ? r.weak_total : weak.length;
+  const weakMore = weakTotal > weak.length ? ` Показаны ${weak.length} из ${weakTotal}.` : "";
+  if (weak.length) html += `<details><summary>Менее вероятные слова (${weakTotal})</summary><p class="hint" style="margin-top:0">Аббревиатуры и иностранные слова: чаще всего обычные термины.${weakMore}</p><div class="sug">${weak.map(row).join("")}</div></details>`;
+  const groups = r.groups || {}, order = r.groups_order || [];
+  if (order.length) {
+    html += `<details><summary>Что заменено (${r.total})</summary><p class="hint" style="margin-top:0">Если заменено лишнее, отметьте слово: при повторном обезличивании оно останется.</p>`;
+    for (const label of order) {
+      html += `<h4 style="margin:var(--s3) 0 var(--s1);font-size:14px">${esc(label)}</h4><div class="scroll"><table class="map"><thead><tr><th>Было</th><th>Стало</th><th>Раз</th><th>Оставить</th></tr></thead><tbody>` +
+        groups[label].slice(0, 200).map(it => `<tr><td>${esc(it.original)}</td><td class="tok">${esc(it.token)}</td><td>${it.count}</td><td><input type="checkbox" data-keep="${esc(it.original)}" aria-label="Не скрывать ${esc(it.original)}"></td></tr>`).join("") + `</tbody></table></div>`;
+    }
+    html += `<div class="row"><button class="btn" id="btn-csv">Сохранить таблицу соответствий</button><span class="hint">Таблица содержит исходные данные: не загружайте её в ИИ.</span></div></details>`;
+  }
+  html += `<details><summary>Добавить свои слова</summary><textarea id="extra-terms" aria-label="Дополнительные слова" placeholder="По одному слову или названию в строке"></textarea></details>`;
+  html += `<div class="row" id="rerun-row" hidden><button class="btn" id="btn-rerun">Обезличить заново с этими правками</button></div>`;
+  html += `<details><summary>Что дальше</summary><ol class="hint" style="margin:0;padding-left:20px"><li>Загрузите сохранённый файл в ИИ и выполните работу.</li><li>Сохраните файл, который вернёт ИИ.</li><li>На вкладке Восстановить выберите этот файл.</li></ol><div class="row"><button class="btn" id="btn-copy-hint">Скопировать подсказку для ИИ</button><span class="hint" id="hint-copied"></span></div></details>`;
+  return html;
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch (e) {
+    const area = document.createElement("textarea"); area.value = text; document.body.appendChild(area); area.select();
+    let ok = false; try { ok = document.execCommand("copy"); } catch (err) {} area.remove(); return ok;
+  }
+}
+function csvCell(v) { return '"' + String(v).replace(/"/g, '""') + '"'; }
+function bindExtras(mode, job) {
+  const box = $("#result-anon");
+  const copy = $("#btn-copy-hint");
+  if (copy) copy.onclick = async () => {
+    if (await copyText(AI_HINT)) { $("#hint-copied").textContent = "Скопировано."; return; }
+    if (!$("#hint-manual")) {
+      const area = document.createElement("textarea"); area.id = "hint-manual"; area.readOnly = true; area.value = AI_HINT; area.setAttribute("aria-label", "Подсказка для ИИ");
+      copy.closest("details").appendChild(area);
+    }
+    $("#hint-manual").focus(); $("#hint-manual").select();
+  };
+  const csv = $("#btn-csv");
+  if (csv) csv.onclick = () => {
+    const rows = [["Группа", "Было", "Стало", "Раз"]];
+    for (const label of (job.result.groups_order || [])) for (const it of job.result.groups[label]) rows.push([label, it.original, it.token, it.count]);
+    saveTextFile("соответствия.csv", rows.map(r => r.map(csvCell).join(";")).join("\r\n"));
+  };
+  const rerun = $("#btn-rerun"); if (!rerun) return;
+  const update = () => { $("#rerun-row").hidden = !(box.querySelector("[data-sug]:checked, [data-keep]:checked") || $("#extra-terms").value.trim()); };
+  box.querySelectorAll("[data-sug], [data-keep]").forEach(c => c.onchange = update);
+  $("#extra-terms").oninput = update;
+  rerun.onclick = () => {
+    const overrides = {}, sugg = job.result.suggestions || [];
+    box.querySelectorAll("[data-sug]:checked").forEach(c => { overrides[sugg[+c.dataset.sug].text] = "hide"; });
+    box.querySelectorAll("[data-keep]:checked").forEach(c => { overrides[c.dataset.keep] = "keep"; });
+    const options = {...modes.anon.lastOptions, strict: $("#opt-strict").checked, countries: $("#opt-countries").checked, neutral_names: $("#opt-names").checked, hide_terms: [...(modes.anon.lastOptions.hide_terms || []), ...lines($("#extra-terms").value)]};
+    modes.anon.lastOptions = options;
+    runJob("anon", "/api/rerun", {job: job.id, overrides, options});
+  };
+}
+
+/* ---------- настройки ---------- */
+async function loadState() {
+  STATE = await api("/api/state");
+  $("#opt-numbers").checked = !!STATE.prefs.numbers;
+  $("#opt-strict").checked = !!STATE.prefs.strict;
+  $("#opt-countries").checked = !!STATE.prefs.countries;
+  $("#opt-names").checked = !!STATE.prefs.neutral_names;
+  $("#notice").hidden = !STATE.notice; $("#notice").textContent = STATE.notice || "";
+}
+function fillSettings() {
+  const p = STATE.prefs;
+  $("#pref-hide").value = (p.hide_terms || []).join("\n");
+  $("#pref-keep").value = (p.keep_terms || []).join("\n");
+  $("#pref-numbers").checked = !!p.numbers;
+  $("#pref-strict").checked = !!p.strict;
+  $("#pref-countries").checked = !!p.countries;
+  $("#pref-names").checked = !!p.neutral_names;
+  $("#pref-retention").value = String(p.retention_days);
+  $("#vault-stats").textContent = `Сохранено значений: ${STATE.stats.entities}.`;
+}
+$("#open-settings").onclick = async () => { try { await loadState(); } catch (e) { toast(e.message); return; } fillSettings(); $("#settings").showModal(); };
+$("#btn-save-settings").onclick = async () => {
+  try {
+    STATE = await post("/api/prefs", {hide_terms: lines($("#pref-hide").value), keep_terms: lines($("#pref-keep").value),
+      numbers: $("#pref-numbers").checked, strict: $("#pref-strict").checked,
+      countries: $("#pref-countries").checked, neutral_names: $("#pref-names").checked, retention_days: +$("#pref-retention").value});
+    $("#opt-numbers").checked = !!STATE.prefs.numbers;
+    $("#opt-strict").checked = !!STATE.prefs.strict;
+    $("#opt-countries").checked = !!STATE.prefs.countries;
+    $("#opt-names").checked = !!STATE.prefs.neutral_names;
+    $("#settings").close(); toast("Настройки сохранены");
+  } catch (e) { toast(e.message); }
+};
+$("#settings").addEventListener("click", e => { if (e.target === $("#settings")) $("#settings").close(); });
+$("#btn-clear").onclick = async () => {
+  const yes = await ask({title: "Очистить хранилище?", text: "Все соответствия будут удалены. Ранее обезличенные файлы после этого не восстановить.", ok: "Очистить"});
+  if (!yes) return;
+  try { STATE = await post("/api/vault/clear", {}); fillSettings(); toast("Хранилище очищено"); } catch (e) { toast(e.message); }
+};
+const PASSWORD_RULE = v => v.length < 6 ? "Пароль должен быть не короче 6 знаков." : "";
+$("#btn-backup").onclick = async () => {
+  const password = await ask({title: "Пароль для копии", text: "Не короче 6 знаков. Без пароля копию не открыть.", password: true, ok: "Сохранить", validate: PASSWORD_RULE});
+  if (!password) return;
+  try {
+    const bridge = await nativeReady();
+    if (bridge) {
+      const r = await bridge.export_backup(password);
+      if (r.error) throw new Error(r.error);
+      if (r.path) toast("Копия сохранена: " + r.path);
+      return;
+    }
+    const resp = await fetch("/api/backup/export", {method: "POST", credentials: "same-origin", headers: {...HEADERS, "Content-Type": "application/json"}, body: JSON.stringify({password})});
+    if (!resp.ok) throw new Error((await resp.json()).error);
+    const blob = await resp.blob(); const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = "anonymizer-backup.anonkeys"; a.click(); URL.revokeObjectURL(a.href);
+  } catch (e) { toast(e.message); }
+};
+$("#btn-import").onclick = async () => {
+  let bridge;
+  try { bridge = await nativeReady(); } catch (e) { return toast(e.message); }
+  if (!bridge) { $("#input-import").click(); return; }
+  const picked = await bridge.pick_backup();
+  if (picked.error) return toast(picked.error);
+  if (picked.cancelled) return;
+  const password = await ask({title: "Пароль копии", text: picked.name, password: true, ok: "Загрузить"});
+  if (password == null) return;
+  const r = await bridge.import_backup(password);
+  if (r.error) return toast(r.error);
+  STATE = r.state; fillSettings(); toast("Копия загружена");
+};
+$("#input-import").onchange = async ev => {
+  const file = ev.target.files[0]; ev.target.value = ""; if (!file) return;
+  const password = await ask({title: "Пароль копии", text: file.name, password: true, ok: "Загрузить"});
+  if (password == null) return;
+  try {
+    await api("/api/backup/import", {method: "POST", body: file, headers: {"X-Password": encodeURIComponent(password), "Content-Type": "application/octet-stream"}});
+    await loadState(); fillSettings(); toast("Копия загружена");
+  } catch (e) { toast(e.message); }
+};
+
+/* ---------- add-in для Office ---------- */
+async function loadAddin() {
+  const box = $("#addin-status");
+  try {
+    const st = await api("/api/addin/status");
+    if (!st.supported) { box.textContent = "Add-in работает в Windows и macOS."; $("#btn-addin-install").hidden = true; return; }
+    if (st.server_error) { box.textContent = st.server_error; $("#btn-addin-remove").hidden = !st.installed; return; }
+    box.textContent = st.installed ? (st.trusted ? "Подключён. Перезапустите Office, если кнопки Anonymizer ещё нет." : "Подключён, но система не доверяет сертификату: нажмите «Подключить» ещё раз и подтвердите.")
+      : "Не подключён.";
+    $("#btn-addin-install").textContent = st.installed ? "Подключить заново" : "Подключить";
+    $("#btn-addin-remove").hidden = !st.installed;
+  } catch (e) { box.textContent = "Не удалось проверить состояние."; }
+}
+async function addinAction(path, label) {
+  const result = $("#addin-result");
+  result.textContent = label;
+  for (const b of ["#btn-addin-install", "#btn-addin-remove"]) $(b).disabled = true;
+  try {
+    const r = await post(path, {});
+    result.textContent = r.steps.map(x => (x.ok ? "" : "Внимание: ") + x.message).join(" ");
+  } catch (e) { result.textContent = e.message; }
+  for (const b of ["#btn-addin-install", "#btn-addin-remove"]) $(b).disabled = false;
+  loadAddin();
+}
+$("#btn-addin-install").onclick = () => addinAction("/api/addin/install", "Подключение. Система может попросить подтвердить сертификат.");
+$("#btn-addin-remove").onclick = () => addinAction("/api/addin/uninstall", "Отключение.");
+$("#btn-quit").onclick = async () => { try { const bridge = await nativeReady(); if (bridge && bridge.quit_app) await bridge.quit_app(); } catch (e) { toast(e.message); } };
+nativeReady().then(b => { if (b && b.quit_app) $("#btn-quit").hidden = false; }).catch(() => {});
+$("#open-settings").addEventListener("click", loadAddin);
+
+/* ---------- старт ---------- */
+loadState().catch(() => {});
+</script>
+</body>
+</html>

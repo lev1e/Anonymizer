@@ -1,0 +1,23 @@
+.venv/
+.build-venv/
+__pycache__/
+*.pyc
+.DS_Store
+build/
+dist/
+packaging/MicrosoftEdgeWebview2Setup.exe
+# Реальные документы для ручной проверки: содержат данные клиента, в репозиторий не попадают.
+case/
+.claude/
+.venv-mac/
+# Локальное окружение и рабочие файлы
+.venv312/
+.venv*/
+# Личные заметки, не для публикации
+ARCHITECTURE_FOR_GPT.md
+# Office.js скачивается при сборке (tools/fetch_office_js.py): файлы Microsoft в репозиторий не входят
+anonymizer/addin_web/vendor/
+# Резервные копии хранилища и ключи
+*.anonkeys
+device.key
+vault.bin
