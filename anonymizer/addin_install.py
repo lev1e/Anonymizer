@@ -33,7 +33,7 @@ SHARED_RUNTIME = """  <Requirements>
 """
 
 
-def render_manifest(port: int = ADDIN_PORT, shared: bool = True) -> str:
+def render_manifest(port: int = ADDIN_PORT, shared: bool = False) -> str:
     block = (ADDIN_DIR / "host_block.xml.tmpl").read_text("utf-8")
     blocks = "\n".join(block.replace("{HOST_TYPE}", host) for host in HOSTS.values())
     text = (ADDIN_DIR / "manifest.xml.tmpl").read_text("utf-8")
