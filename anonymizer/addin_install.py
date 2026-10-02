@@ -117,9 +117,10 @@ def set_autostart(enabled: bool, dev: bool = False) -> tuple[bool, str]:
             path = _agent_path()
             if enabled and command:
                 path.parent.mkdir(parents=True, exist_ok=True)
+                # ProcessType «Background» macOS душит (низкий приоритет, отклики с задержкой в секунды): панель Office висела на загрузке.
                 # KeepAlive только при аварийном выходе: «Выйти из программы» завершает её с кодом 0 и не перезапускается.
                 path.write_bytes(plistlib.dumps({"Label": AGENT_LABEL, "ProgramArguments": command, "RunAtLoad": True,
-                                                 "KeepAlive": {"SuccessfulExit": False}, "ProcessType": "Background"}))
+                                                 "KeepAlive": {"SuccessfulExit": False}, "ProcessType": "Interactive"}))
             elif path.exists():
                 path.unlink()
         else:
